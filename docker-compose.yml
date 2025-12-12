@@ -1,0 +1,198 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: luser-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-luser}
+      POSTGRES_USER: ${DB_USER:-luser}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-luser123}
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./crates/luser-db/migrations:/docker-entrypoint-initdb.d
+      - ./scripts/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-luser}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - luser-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: luser-redis
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD:-redis123}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis123}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - luser-network
+    restart: unless-stopped
+
+  luser-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      args:
+        RUST_VERSION: 1.75
+        CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+    image: luser-api:${TAG:-latest}
+    container_name: luser-api
+    environment:
+      - RUST_LOG=info,luser_api=debug,luser_core=debug,sqlx=warn
+      - RUST_BACKTRACE=1
+      - DATABASE_URL=postgres://${DB_USER:-luser}:${DB_PASSWORD:-luser123}@postgres:5432/${DB_NAME:-luser}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis123}@redis:6379
+      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-key-change-in-production}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-your-32-byte-encryption-key-here}
+      - API_HOST=0.0.0.0
+      - API_PORT=3000
+      - RUN_MODE=development
+      - TZ=Asia/Shanghai
+      - LUSER_SERVER_HOST=0.0.0.0
+      - LUSER_SERVER_PORT=3000
+      - LUSER_SERVER_WORKER_THREADS=4
+      - LUSER_DATABASE_MAX_CONNECTIONS=20
+      - LUSER_DATABASE_MIN_CONNECTIONS=5
+      - LUSER_REDIS_POOL_SIZE=10
+      - LUSER_JWT_EXPIRATION_HOURS=24
+      - LUSER_JWT_REFRESH_EXPIRATION_DAYS=30
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./crates:/app/crates
+      - ./Cargo.toml:/app/Cargo.toml
+      - ./Cargo.lock:/app/Cargo.lock
+      - cargo_cache:/usr/local/cargo/registry
+      - target_cache:/app/target
+    networks:
+      - luser-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  luser-admin:
+    build:
+      context: .
+      dockerfile: Dockerfile.admin
+      args:
+        RUST_VERSION: 1.75
+    image: luser-admin:${TAG:-latest}
+    container_name: luser-admin
+    environment:
+      - ADMIN_API_HOST=0.0.0.0
+      - ADMIN_API_PORT=3001
+      - DATABASE_URL=postgres://${DB_USER:-luser}:${DB_PASSWORD:-luser123}@postgres:5432/${DB_NAME:-luser}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis123}@redis:6379
+      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-key-change-in-production}
+      - RUN_MODE=development
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./crates:/app/crates
+      - cargo_cache:/usr/local/cargo/registry
+      - target_cache:/app/target
+    networks:
+      - luser-network
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: luser-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - luser-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: luser-grafana
+    ports:
+      - "3002:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - luser-network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+networks:
+  luser-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  cargo_cache:
+    driver: local
+  target_cache:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local

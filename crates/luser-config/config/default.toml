@@ -1,0 +1,344 @@
+# Luser Platform 默认配置
+# ==========================
+
+[server]
+host = "0.0.0.0"
+port = 3000
+worker_threads = 4
+request_timeout = 30
+shutdown_timeout = 30
+max_body_size = 10
+enable_https = false
+enable_http2 = true
+enable_compression = true
+enable_access_log = true
+
+[database]
+url = "postgres://postgres:password@localhost:5432/luser"
+max_connections = 20
+min_connections = 5
+connection_timeout = 30
+idle_timeout = 600
+max_lifetime = 1800
+enable_health_check = true
+enable_ssl = false
+pool_name = "luser-pool"
+
+[redis]
+url = "redis://localhost:6379"
+pool_size = 10
+default_ttl = 3600
+connect_timeout = 10
+command_timeout = 30
+enable_tls = false
+cluster_mode = false
+sentinel_mode = false
+database = 0
+
+[jwt]
+secret = "your-super-secret-jwt-key-change-in-production"
+expiration_hours = 24
+refresh_expiration_days = 30
+issuer = "luser-platform"
+audience = "luser-users"
+algorithm = "HS256"
+enable_blacklist = true
+blacklist_ttl = 86400
+
+[encryption]
+key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+algorithm = "AES-GCM"
+iv_length = 12
+tag_length = 16
+enable_hardware_acceleration = true
+key_rotation_days = 90
+
+[video]
+max_file_size_mb = 2048
+allowed_formats = ["mp4", "mov", "avi", "mkv"]
+max_duration_seconds = 7200
+thumbnail_enabled = true
+thumbnail_size = [320, 180]
+watermark_enabled = false
+watermark_position = "bottom-right"
+enable_adaptive_bitrate = true
+enable_drm = false
+drm_provider = "widevine"
+enable_content_audit = true
+audit_provider = "aliyun"
+
+[[video.transcoding_profiles]]
+name = "360p"
+width = 640
+height = 360
+bitrate = 800
+codec = "h264"
+framerate = 30
+keyframe_interval = 60
+hardware_acceleration = true
+enabled = true
+
+[[video.transcoding_profiles]]
+name = "720p"
+width = 1280
+height = 720
+bitrate = 2500
+codec = "h264"
+framerate = 30
+keyframe_interval = 60
+hardware_acceleration = true
+enabled = true
+
+[[video.transcoding_profiles]]
+name = "1080p"
+width = 1920
+height = 1080
+bitrate = 5000
+codec = "h264"
+framerate = 30
+keyframe_interval = 60
+hardware_acceleration = true
+enabled = true
+
+[payment]
+enabled = true
+default_currency = "CNY"
+platform_fee_rate = 0.2
+min_withdrawal_amount = 100.0
+max_withdrawal_amount = 50000.0
+withdrawal_processing_hours = 24
+sandbox = false
+callback_url = "https://api.example.com/payment/callback"
+return_url = "https://example.com/payment/return"
+
+[rate-limit]
+enabled = true
+global_limit = 1000
+ip_limit = 100
+user_limit = 500
+upload_limit = 10
+captcha_limit = 10
+window_seconds = 60
+sliding_window = true
+
+[cors]
+enabled = true
+allowed_origins = ["*"]
+allowed_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+allowed_headers = ["*"]
+allow_credentials = false
+max_age = 86400
+expose_headers = []
+
+[logging]
+level = "info"
+format = "text"
+dir = "./logs"
+max_file_size = 100
+max_files = 10
+enable_console = true
+enable_file = true
+enable_json = false
+enable_timestamp = true
+enable_thread_id = false
+enable_trace_id = true
+
+[telemetry]
+enabled = true
+provider = "opentelemetry"
+endpoint = "http://localhost:4317"
+sampling_rate = 0.1
+enable_metrics = true
+enable_tracing = true
+enable_logs = true
+service_name = "luser-api"
+service_version = "0.1.0"
+deployment_env = "development"
+
+[cloud-service]
+default_provider = "tencent"
+
+[cloud-service.tencent]
+enabled = false
+region = "ap-guangzhou"
+
+[cloud-service.tencent.vod]
+enabled = false
+storage_region = "ap-guangzhou"
+transcode_template = "LongVideoPreset"
+enable_drm = false
+
+[cloud-service.tencent.cos]
+enabled = false
+region = "ap-guangzhou"
+enable_cdn = false
+
+[cloud-service.aliyun]
+enabled = false
+region = "cn-shanghai"
+
+[cloud-service.aliyun.vod]
+enabled = false
+storage_region = "cn-shanghai"
+enable_drm = false
+
+[cloud-service.aliyun.oss]
+enabled = false
+region = "cn-shanghai"
+enable_cdn = false
+
+[storage]
+default_provider = "local"
+enable_multi_storage = false
+strategy = "primary"
+
+[storage.local]
+enabled = true
+dir = "./storage"
+max_storage_gb = 100
+enable_symlink = false
+file_permissions = "0644"
+
+[storage.s3]
+enabled = false
+endpoint = "http://localhost:9000"
+region = "us-east-1"
+enable_ssl = true
+path_style = false
+
+[email]
+enabled = false
+smtp_server = "smtp.gmail.com"
+smtp_port = 587
+sender_email = "noreply@example.com"
+sender_name = "luser Platform"
+enable_tls = true
+enable_starttls = true
+connect_timeout = 30
+command_timeout = 60
+
+[sms]
+enabled = false
+provider = "aliyun"
+rate_limit_seconds = 60
+code_expiry_seconds = 300
+enable_international = false
+default_country_code = "+86"
+
+[cdn]
+enabled = false
+provider = "cloudflare"
+enable_https = true
+enable_http2 = true
+cache_policy = "public, max-age=31536000"
+cache_ttl = 31536000
+enable_gzip = true
+enable_brotli = true
+enable_referer = false
+
+[security]
+enable_headers = true
+enable_csp = true
+csp_policy = "default-src 'self'"
+enable_hsts = true
+hsts_max_age = 31536000
+enable_xss_protection = true
+enable_clickjacking_protection = true
+enable_mime_sniffing_protection = true
+enable_referrer_policy = true
+referrer_policy = "strict-origin-when-cross-origin"
+enable_certificate_pinning = false
+enable_request_signing = false
+signing_algorithm = "HMAC-SHA256"
+
+[cache]
+enabled = true
+default_ttl = 3600
+max_size_mb = 100
+cleanup_interval = 3600
+strategy = "lru"
+enable_memory = true
+enable_redis = true
+enable_distributed = false
+
+[queue]
+enabled = true
+provider = "redis"
+default_queue = "luser-queue"
+retries = 3
+retry_delay = 5
+max_workers = 10
+worker_idle_timeout = 300
+
+[queue.redis]
+enabled = true
+url = "redis://localhost:6379"
+prefix = "luser:queue"
+queue_count = 1
+
+[queue.rabbitmq]
+enabled = false
+url = "amqp://guest:guest@localhost:5672"
+exchange = "luser-exchange"
+exchange_type = "direct"
+queue = "luser-queue"
+routing_key = "luser-task"
+
+[task]
+enabled = true
+scheduler = "database"
+
+[task.database-cleanup]
+enabled = true
+interval = 86400
+retention_days = 30
+batch_size = 1000
+
+[task.cache-cleanup]
+enabled = true
+interval = 3600
+mode = "lru"
+ratio = 0.2
+
+[task.email-send]
+enabled = false
+interval = 60
+batch_size = 100
+retry_count = 3
+
+[task.video-transcode]
+enabled = true
+interval = 60
+max_concurrent = 5
+timeout = 3600
+retry_count = 3
+
+[task.statistics]
+enabled = true
+interval = 3600
+retention_days = 30
+
+[task.backup]
+enabled = true
+interval = 86400
+backup_dir = "./backups"
+retention_days = 30
+compression = "gzip"
+encrypt = true
+
+[features]
+enable_registration = true
+enable_email_verification = true
+enable_phone_verification = false
+enable_two_factor = false
+enable_social_login = false
+enable_api_docs = true
+enable_admin_panel = true
+enable_realtime_notifications = true
+enable_websocket = true
+enable_graphql = false
+enable_search = true
+enable_recommendations = true
+enable_analytics = true
+enable_ab_testing = false
+enable_experimental = false

@@ -1,0 +1,87 @@
+# 构建阶段
+FROM rust:1.75-slim AS builder
+
+# 安装构建依赖
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 设置工作目录
+WORKDIR /app
+
+# 复制Cargo文件
+COPY Cargo.toml Cargo.lock ./
+COPY crates/luser-common/Cargo.toml crates/luser-common/
+COPY crates/luser-db/Cargo.toml crates/luser-db/
+COPY crates/luser-config/Cargo.toml crates/luser-config/
+COPY crates/luser-cloud-tencent/Cargo.toml crates/luser-cloud-tencent/
+COPY crates/luser-cloud-aliyun/Cargo.toml crates/luser-cloud-aliyun/
+COPY crates/luser-wapay/Cargo.toml crates/luser-wapay/
+COPY crates/luser-cloud/Cargo.toml crates/luser-cloud/
+COPY crates/luser-core/Cargo.toml crates/luser-core/
+COPY crates/luser-api/Cargo.toml crates/luser-api/
+
+# 构建依赖缓存
+RUN mkdir -p crates/luser-common/src \
+    && echo "fn main() {}" > crates/luser-common/src/lib.rs \
+    && mkdir -p crates/luser-db/src \
+    && echo "fn main() {}" > crates/luser-db/src/lib.rs \
+    && mkdir -p crates/luser-config/src \
+    && echo "fn main() {}" > crates/luser-config/src/lib.rs \
+    && mkdir -p crates/luser-api/src \
+    && echo "fn main() {}" > crates/luser-api/src/main.rs \
+    && cargo build --release --workspace
+
+# 复制源代码
+COPY . .
+
+# 清理虚拟的main.rs文件
+RUN rm -f crates/luser-common/src/lib.rs \
+    crates/luser-db/src/lib.rs \
+    crates/luser-config/src/lib.rs \
+    crates/luser-api/src/main.rs
+
+# 复制实际的源代码
+COPY crates/ ./crates/
+
+# 构建应用
+RUN cargo build --release --package luser-api
+
+# 运行时阶段
+FROM debian:bookworm-slim
+
+# 安装运行时依赖
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 创建非root用户
+RUN groupadd -r luser && useradd -r -g luser luser
+
+# 设置工作目录
+WORKDIR /app
+
+# 复制二进制文件
+COPY --from=builder /app/target/release/luser-api /app/luser-api
+
+# 复制配置文件
+COPY --from=builder /app/crates/luser-api/config /app/config
+COPY --from=builder /app/crates/luser-db/migrations /app/migrations
+
+# 设置权限
+RUN chown -R luser:luser /app
+USER luser
+
+# 设置健康检查
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
+# 暴露端口
+EXPOSE 3000
+
+# 运行应用
+CMD ["/app/luser-api"]

@@ -1,0 +1,57 @@
+[package]
+name = "luser-config"
+version = "0.1.0"
+edition = "2024"
+description = "Luser平台配置管理模块"
+authors = ["Hwpe Team <team@hwpe.cn>"]
+license = "MIT"
+repository = "https://github.com/wild1024/luser-backend"
+readme = "README.md"
+
+[dependencies]
+tokio = { workspace = true}
+serde =  { workspace = true}
+serde_json =  { workspace = true}
+
+anyhow =  { workspace = true}
+thiserror = { workspace = true}
+tracing = { workspace = true}
+tracing-subscriber = { workspace = true}
+async-trait = { workspace = true}
+
+chrono = { workspace = true}
+validator =  { workspace = true}
+aes-gcm =  { workspace = true , optional = true}
+
+ring =  { workspace = true, optional = true}
+base64 =  { workspace = true}
+hex =  { workspace = true}
+parking_lot =  { workspace = true}
+
+lazy_static =  { workspace = true}
+regex =  { workspace = true}
+url =  { workspace = true}
+
+bincode =  { workspace = true}
+sqlx ={ workspace = true }
+redis = {workspace = true }
+bigdecimal = {workspace = true}
+rustls-pemfile = "2.1"
+toml = "0.9"
+config = "0.15"
+num_cpus = "1.17"
+
+[dev-dependencies]
+tempfile = "3.8"
+rstest = "0.26"
+tokio-test = "0.4"
+
+[features]
+default = ["encryption"]
+encryption = ["aes-gcm", "ring"]
+
+testing = []
+
+[build-dependencies]
+vergen = "9.0"
+
