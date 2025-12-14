@@ -113,18 +113,22 @@ pub struct ServerConfig {
     
     /// 工作线程数量
     #[serde(default = "default_worker_threads")]
+    #[validate(range(min = 1, max = 64))]
     pub worker_threads: usize,
     
     /// 请求超时时间（秒）
     #[serde(default = "default_request_timeout")]
+    #[validate(range(min = 1, max = 300))]
     pub request_timeout: u64,
     
     /// 关闭超时时间（秒）
     #[serde(default = "default_shutdown_timeout")]
+     #[validate(range(min = 1, max = 300))]
     pub shutdown_timeout: u64,
     
     /// 最大请求体大小（MB）
     #[serde(default = "default_max_body_size")]
+    #[validate(range(min = 1, max = 1000))]
     pub max_body_size: u64,
     
     /// 启用HTTPS
@@ -157,9 +161,8 @@ pub struct ServerConfig {
 pub struct DatabaseConfig {
     /// 数据库连接URL
     #[serde(default = "default_database_url")]
-    #[validate(length(min = 1))]
+    #[validate(url)]
     pub url: String,
-    
     /// 最大连接数
     #[serde(default = "default_max_connections")]
     #[validate(range(min = 1, max = 100))]
@@ -172,14 +175,17 @@ pub struct DatabaseConfig {
     
     /// 连接超时时间（秒）
     #[serde(default = "default_connection_timeout")]
+     #[validate(range(min = 1, max = 300))]
     pub connection_timeout: u64,
     
     /// 空闲连接超时时间（秒）
     #[serde(default = "default_idle_timeout")]
+     #[validate(range(min = 1, max = 3600))]
     pub idle_timeout: u64,
     
     /// 连接最大生存时间（秒）
     #[serde(default = "default_max_lifetime")]
+    #[validate(range(min = 1, max = 7200))]
     pub max_lifetime: u64,
     
     /// 启用连接健康检查
@@ -204,6 +210,7 @@ pub struct DatabaseConfig {
     
     /// 连接池名称
     #[serde(default = "default_pool_name")]
+    #[validate(length(min = 1))]
     pub pool_name: String,
 }
 
@@ -212,7 +219,7 @@ pub struct DatabaseConfig {
 pub struct RedisConfig {
     /// Redis连接URL
     #[serde(default = "default_redis_url")]
-    #[validate(length(min = 1))]
+   #[validate(url)]
     pub url: String,
     
     /// 连接池大小
@@ -222,14 +229,17 @@ pub struct RedisConfig {
     
     /// 默认TTL（秒）
     #[serde(default = "default_redis_ttl")]
+    #[validate(range(min = 1))]
     pub default_ttl: u64,
     
     /// 连接超时时间（秒）
     #[serde(default = "default_redis_connect_timeout")]
+    #[validate(range(min = 1, max = 300))]
     pub connect_timeout: u64,
     
     /// 命令超时时间（秒）
     #[serde(default = "default_redis_command_timeout")]
+    #[validate(range(min = 1, max = 300))]
     pub command_timeout: u64,
     
     /// 启用TLS
@@ -281,14 +291,17 @@ pub struct JwtConfig {
     
     /// 签发者
     #[serde(default = "default_jwt_issuer")]
+    #[validate(length(min = 1))]
     pub issuer: String,
     
     /// 受众
     #[serde(default = "default_jwt_audience")]
+    #[validate(length(min = 1))]
     pub audience: String,
     
     /// 算法
     #[serde(default = "default_jwt_algorithm")]
+      #[validate(length(min = 1))]
     pub algorithm: String,
     
     /// 启用黑名单
@@ -297,6 +310,7 @@ pub struct JwtConfig {
     
     /// 黑名单TTL（秒）
     #[serde(default = "default_jwt_blacklist_ttl")]
+     #[validate(range(min = 1))]
     pub blacklist_ttl: u64,
 }
 
@@ -310,15 +324,17 @@ pub struct EncryptionConfig {
     
     /// 加密算法
     #[serde(default = "default_encryption_algorithm")]
+    #[validate(length(min = 1))]
     pub algorithm: String,
     
     /// 初始化向量（IV）长度
     #[serde(default = "default_encryption_iv_length")]
-    #[validate(range(min = 12, max = 16))]
+     #[validate(range(min = 8, max = 16))]
     pub iv_length: usize,
     
     /// 认证标签长度
     #[serde(default = "default_encryption_tag_length")]
+    #[validate(range(min = 12, max = 16))]
     pub tag_length: usize,
     
     /// 启用硬件加速
@@ -327,6 +343,7 @@ pub struct EncryptionConfig {
     
     /// 密钥轮换间隔（天）
     #[serde(default = "default_key_rotation_days")]
+    #[validate(range(min = 1, max = 365))]
     pub key_rotation_days: u32,
 }
 
@@ -1851,7 +1868,7 @@ fn default_enable_memory_cache() -> bool { true }
 fn default_enable_redis_cache() -> bool { true }
 fn default_enable_distributed_cache() -> bool { false }
 
-fn default_enable_queue() -> bool { true }
+fn default_enable_queue() -> bool { false }
 fn default_queue_provider() -> String { "redis".to_string() }
 fn default_redis_queue_url() -> String { "redis://localhost:6379".to_string() }
 fn default_queue_prefix() -> String { "luser:queue".to_string() }

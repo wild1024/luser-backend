@@ -1,10 +1,53 @@
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc};
+
+use chrono::Utc;
 use parking_lot::RwLock;
+use sqlx::{Pool, Postgres};
 use tracing::{info, warn, instrument};
-use config::{Config, File, Environment, FileFormat};
-use validator::Validate;
-use crate::{AppConfig, ConfigError, ConfigResult, ConfigSecurityLevel, DEFAULT_CONFIG_PATH, ENV_PREFIX, get_global_encryptor, init_global_encryptor};
+use config::{Config, ConfigBuilder, Environment, File, FileFormat};
+use tracing::debug;
+use crate::{AppConfig, ConfigError, ConfigResult, ConfigSourceType, DEFAULT_CONFIG_FILE, DEFAULT_CONFIG_PATH, DEFAULT_RUN_MODE, ENV_PREFIX, RUN_MODE_ENV};
+use sqlx::Row;
+/// 配置合并优先级（从低到高）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigPriority {
+    /// 最低优先级：默认值
+    Defaults = 1,
+    /// 较低优先级：默认配置文件
+    DefaultFile = 2,
+    /// 中等优先级：环境特定配置文件
+    EnvironmentFile = 3,
+    /// 较高优先级：环境变量
+    EnvironmentVariables = 4,
+    /// 最高优先级：数据库配置
+    Database = 5,
+    /// 运行时优先级：内存覆盖
+    Runtime = 6,
+}
+
+/// 配置合并策略
+#[derive(Debug, Clone)]
+pub struct MergeStrategy {
+    /// 是否启用深度合并
+    pub deep_merge: bool,
+    /// 是否覆盖数组
+    pub replace_arrays: bool,
+    /// 是否保留未定义的字段
+    pub keep_undefined: bool,
+    /// 是否启用调试日志
+    pub debug: bool,
+}
+
+impl Default for MergeStrategy {
+    fn default() -> Self {
+        Self {
+            deep_merge: true,
+            replace_arrays: false,
+            keep_undefined: false,
+            debug: false,
+        }
+    }
+}
 
 /// 配置加载器
 #[derive(Debug, Clone)]
@@ -12,34 +55,44 @@ pub struct ConfigLoader {
     sources: Vec<ConfigSource>,
     environment: String,
     config_dir: PathBuf,
+     /// 合并策略
+    merge_strategy: MergeStrategy,
+    /// 数据库连接池（用于动态配置）
+    db_pool: Option<Arc<Pool<Postgres>>>,
+    /// 配置缓存（数据库配置）
+    db_config_cache: Arc<RwLock<Option<AppConfig>>>,
+    /// 最后更新时间
+    last_update_time: Arc<RwLock<chrono::DateTime<Utc>>>,
 }
-
 /// 配置源
 #[derive(Debug, Clone)]
-pub enum ConfigSource {
-    /// 文件源
-    File {
-        path: PathBuf,
-        required: bool,
-        format: FileFormat,
-    },
-    /// 环境变量源
-    Environment {
-        prefix: String,
-        separator: String,
-    },
-    /// 默认值
-    Defaults,
+pub struct ConfigSource {
+    /// 源类型
+    pub source_type: ConfigSourceType,
+    /// 配置数据
+    pub data: config::Config,
+    /// 优先级
+    pub priority: ConfigPriority,
+    /// 时间戳
+    pub timestamp: chrono::DateTime<Utc>,
+    /// 描述
+    pub description: String,
 }
+
+
 
 impl ConfigLoader {
     /// 创建新的配置加载器
     pub fn new() -> Self {
         Self {
             sources: Vec::new(),
-            environment: std::env::var("RUN_MODE")
-                .unwrap_or_else(|_| "development".to_string()),
+            environment: std::env::var(RUN_MODE_ENV)
+                .unwrap_or_else(|_| DEFAULT_RUN_MODE.to_string()),
             config_dir: PathBuf::from(DEFAULT_CONFIG_PATH),
+              merge_strategy: MergeStrategy::default(),
+            db_pool: None,
+            db_config_cache: Arc::new(RwLock::new(None)),
+            last_update_time: Arc::new(RwLock::new(Utc::now())),
         }
     }
     
@@ -54,40 +107,158 @@ impl ConfigLoader {
         self.config_dir = dir.as_ref().to_path_buf();
         self
     }
+       /// 设置合并策略
+    pub fn set_merge_strategy(&mut self, strategy: MergeStrategy) -> &mut Self {
+        self.merge_strategy = strategy;
+        self
+    }
+       /// 设置数据库连接池（用于动态配置）
+    pub fn set_database_pool(&mut self, pool: Pool<Postgres>) -> &mut Self {
+        self.db_pool = Some(Arc::new(pool));
+        self
+    }
     
-    /// 添加配置文件源
-    pub fn add_source_file<P: AsRef<Path>>(&mut self, path: P) -> ConfigResult<&mut Self> {
-        self.sources.push(ConfigSource::File {
-            path: path.as_ref().to_path_buf(),
-            required: true,
-            format: FileFormat::Toml,
+     /// 添加配置文件源
+    fn add_source_file(&mut self, path: &Path, priority: ConfigPriority, description: &str) -> ConfigResult<()> {
+        let config = Config::builder()
+            .add_source(File::from(path))
+            .build()
+            .map_err(|e| ConfigError::LoadFailed(format!("Failed to build file config from {:?}: {}", path, e)))?;
+        
+        self.sources.push(ConfigSource {
+            source_type: ConfigSourceType::File,
+            data: config,
+            priority,
+            timestamp: Utc::now(),
+            description: description.to_string(),
         });
+        
+        Ok(())
+    }
+     /// 添加默认值源
+    pub fn add_defaults_source(&mut self) -> ConfigResult<&mut Self>  {
+       // 创建默认配置
+        let default_config = AppConfig::default();
+        
+        // 将默认配置转换为config::Config
+        let default_toml = toml::to_string_pretty(&default_config)
+            .map_err(|e| ConfigError::SerializationFailed(format!("Failed to serialize default config: {}", e)))?;
+        
+        let config = Config::builder()
+            .add_source(File::from_str(&default_toml, FileFormat::Toml))
+            .build()
+            .map_err(|e| ConfigError::LoadFailed(format!("Failed to build default config: {}", e)))?;
+        
+        self.sources.push(ConfigSource {
+            source_type: ConfigSourceType::Default,
+            data: config,
+            priority: ConfigPriority::Defaults,
+            timestamp: Utc::now(),
+            description: "Default configuration values".to_string(),
+        });
+        
         Ok(self)
     }
-    
-    /// 添加可选配置文件源
-    pub fn add_optional_source_file<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
-        self.sources.push(ConfigSource::File {
-            path: path.as_ref().to_path_buf(),
-            required: false,
-            format: FileFormat::Toml,
-        });
-        self
+    /// 添加默认配置文件源
+    pub fn add_default_file_source(&mut self) -> ConfigResult<&mut Self> {
+        let default_config_path = self.config_dir.join(DEFAULT_CONFIG_FILE);
+        
+        if default_config_path.exists() {
+            self.add_source_file(&default_config_path, ConfigPriority::DefaultFile, "Default config file")?;
+        } else {
+            warn!("Default config file not found: {:?}", default_config_path);
+        }
+        
+        Ok(self)
     }
-    
+    /// 添加环境特定配置文件源
+    pub fn add_environment_file_source(&mut self) -> ConfigResult<&mut Self> {
+        let env_config_path = self.config_dir.join(format!("{}.toml", self.environment));
+        
+        if env_config_path.exists() {
+            self.add_source_file(&env_config_path, ConfigPriority::EnvironmentFile, &format!("{} environment config file", self.environment))?;
+        } else {
+            debug!("Environment config file not found: {:?}", env_config_path);
+        }
+        
+        Ok(self)
+    }
     /// 添加环境变量源
-    pub fn add_environment_source(&mut self, prefix: &str, separator: &str) -> &mut Self {
-        self.sources.push(ConfigSource::Environment {
-            prefix: prefix.to_string(),
-            separator: separator.to_string(),
+    pub fn add_environment_variables_source(&mut self) -> ConfigResult<&mut Self> {
+        let config = Config::builder()
+            .add_source(
+                Environment::with_prefix(ENV_PREFIX)
+                    .separator("__")
+                    .list_separator(",")
+                    .try_parsing(true)
+                    .with_list_parse_key("allowed_origins")
+                    .with_list_parse_key("allowed_methods")
+                    .with_list_parse_key("allowed_formats")
+            )
+            .build()
+            .map_err(|e| ConfigError::LoadFailed(format!("Failed to build environment config: {}", e)))?;
+        
+        self.sources.push(ConfigSource {
+            source_type: ConfigSourceType::Environment,
+            data: config,
+            priority: ConfigPriority::EnvironmentVariables,
+            timestamp: Utc::now(),
+            description: "Environment variables".to_string(),
         });
-        self
+        
+        Ok(self)
     }
-    
-    /// 添加默认值源
-    pub fn add_defaults_source(&mut self) -> &mut Self {
-        self.sources.push(ConfigSource::Defaults);
-        self
+     /// 添加数据库配置源
+    pub fn add_database_source(&mut self) -> ConfigResult<&mut Self> {
+        if let Some(pool) = &self.db_pool {
+            // 尝试从数据库加载配置
+            let db_config = self.load_database_config(pool)?;
+            
+            if let Some(config) = db_config {
+                self.sources.push(ConfigSource {
+                    source_type: ConfigSourceType::Database,
+                    data: config,
+                    priority: ConfigPriority::Database,
+                    timestamp: Utc::now(),
+                    description: "Database configuration".to_string(),
+                });
+                let merged_config =self.merge_sources()?;
+                  let app_config: AppConfig = merged_config
+                .try_deserialize()
+                .map_err(|e| ConfigError::DeserializationFailed(format!("Failed to deserialize merged config: {}", e)))?;
+        
+                // 缓存数据库配置
+                *self.db_config_cache.write() = Some(app_config);
+            } else {
+                debug!("No database configuration found");
+            }
+        } else {
+            debug!("Database pool not set, skipping database configuration");
+        }
+        
+        Ok(self)
+    }
+     /// 添加自定义配置源
+    pub fn add_custom_source<F>(&mut self, priority: ConfigPriority, description: &str, builder: F) -> ConfigResult<&mut Self>
+    where
+        F: FnOnce(ConfigBuilder<config::builder::DefaultState>) -> ConfigResult<ConfigBuilder<config::builder::DefaultState>>,
+    {
+        let base_builder = Config::builder();
+        let config_builder = builder(base_builder)?;
+        
+        let config = config_builder
+            .build()
+            .map_err(|e| ConfigError::LoadFailed(format!("Failed to build custom config: {}", e)))?;
+        
+        self.sources.push(ConfigSource {
+            source_type: ConfigSourceType::Custom,
+            data: config,
+            priority,
+            timestamp: Utc::now(),
+            description: description.to_string(),
+        });
+        
+        Ok(self)
     }
     
     /// 加载配置
@@ -97,124 +268,225 @@ impl ConfigLoader {
         
         let mut config_builder = Config::builder();
         
-        // 添加默认配置目录
-        self.add_default_sources();
+         info!("Loading configuration for environment: {}", self.environment);
         
-        // 处理所有配置源
+        // 1. 按顺序添加所有配置源
+        self.add_default_sources()?;
+        
+        // 2. 按照优先级对源进行排序
+        self.sources.sort_by(|a, b| a.priority.cmp(&b.priority));
+        
+        // 3. 记录所有源
         for source in &self.sources {
-            match source {
-                ConfigSource::File { path, required, format } => {
-                    self.add_file_source(&mut config_builder, path, *required, *format)?;
-                }
-                ConfigSource::Environment { prefix, separator } => {
-                    self.add_env_source(&mut config_builder, prefix, separator);
-                }
-                ConfigSource::Defaults => {
-                    // 默认值已经在AppConfig中定义
-                }
-            }
+            debug!("Config source: {} (priority: {:?})", source.description, source.priority);
         }
+         // 4. 合并所有配置源
+        let merged_config = self.merge_sources()?;
         
-        // 构建并反序列化配置
-        let config = config_builder.build()
-            .map_err(|e| ConfigError::LoadFailed(format!("Failed to build config: {}", e)))?;
+        // 5. 反序列化为AppConfig
+        let app_config: AppConfig = merged_config
+            .try_deserialize()
+            .map_err(|e| ConfigError::DeserializationFailed(format!("Failed to deserialize merged config: {}", e)))?;
         
-        let app_config: AppConfig = config.try_deserialize()
-            .map_err(|e| ConfigError::DeserializationFailed(format!("Failed to deserialize config: {}", e)))?;
+        // 6. 记录合并后的配置摘要
+        self.log_config_summary(&app_config);
         
-        info!("Configuration loaded successfully");
-        Ok(app_config)
-    }
-    
-    /// 从环境变量加载配置
-    pub fn load_from_env(&mut self) -> ConfigResult<AppConfig> {
-        info!("Loading configuration from environment variables");
+        info!("Configuration loaded successfully with {} sources", self.sources.len());
         
-        let config = Config::builder()
-            .add_source(Environment::with_prefix(ENV_PREFIX).separator("_"))
-            .build()
-            .map_err(|e| ConfigError::LoadFailed(format!("Failed to build config from env: {}", e)))?;
-        
-        let app_config: AppConfig = config.try_deserialize()
-            .map_err(|e| ConfigError::DeserializationFailed(format!("Failed to deserialize config from env: {}", e)))?;
-        
-        info!("Configuration loaded from environment variables successfully");
-        Ok(app_config)
-    }
-    
-    /// 从文件加载配置
-    pub fn load_from_file<P: AsRef<Path>>(&mut self, path: P) -> ConfigResult<AppConfig> {
-        info!("Loading configuration from file: {:?}", path.as_ref());
-        
-        let config = Config::builder()
-            .add_source(File::from(path.as_ref()))
-            .build()
-            .map_err(|e| ConfigError::LoadFailed(format!("Failed to build config from file: {}", e)))?;
-        
-        let app_config: AppConfig = config.try_deserialize()
-            .map_err(|e| ConfigError::DeserializationFailed(format!("Failed to deserialize config from file: {}", e)))?;
-        
-        info!("Configuration loaded from file successfully");
         Ok(app_config)
     }
     
     /// 添加默认配置源
-    fn add_default_sources(&mut self) {
-        // 添加默认配置文件
-        let default_config = self.config_dir.join("default.toml");
-        if default_config.exists() {
-            self.sources.push(ConfigSource::File {
-                path: default_config,
-                required: false,
-                format: FileFormat::Toml,
-            });
-        }
+    fn add_default_sources(&mut self) -> ConfigResult<()> {
+        // 清空现有源
+        self.sources.clear();
         
-        // 添加环境特定配置文件
-        let env_config = self.config_dir.join(format!("{}.toml", self.environment));
-        if env_config.exists() {
-            self.sources.push(ConfigSource::File {
-                path: env_config,
-                required: false,
-                format: FileFormat::Toml,
-            });
-        }
+        // 按照优先级从低到高添加源
+        // 1. 默认值（最低优先级）
+        self.add_defaults_source()?;
         
-        // 添加环境变量源
-        self.sources.push(ConfigSource::Environment {
-            prefix: ENV_PREFIX.to_string(),
-            separator: "_".to_string(),
-        });
-    }
-    
-    /// 添加文件源
-    fn add_file_source(
-        &self,
-        builder: &mut config::ConfigBuilder<config::builder::DefaultState>,
-        path: &Path,
-        required: bool,
-        format: FileFormat,
-    ) -> ConfigResult<()> {
-        if path.exists() {
-            info!("Adding config file: {:?}", path);
-            builder.add_source(File::from(path).format(format));
-        } else if required {
-            return Err(ConfigError::LoadFailed(format!("Required config file not found: {:?}", path)));
-        } else {
-            warn!("Optional config file not found: {:?}", path);
-        }
+        // 2. 默认配置文件
+        self.add_default_file_source()?;
+        
+        // 3. 环境特定配置文件
+        self.add_environment_file_source()?;
+        
+        // 4. 环境变量
+        self.add_environment_variables_source()?;
+        
+        // 5. 数据库配置（如果可用）
+        self.add_database_source()?;
+        
         Ok(())
     }
+    /// 合并所有配置源
+    fn merge_sources(&self) -> ConfigResult<Config> {
+        let mut current_config = Config::builder();
+        
+        // 按照优先级顺序合并
+        for source in &self.sources {
+            if self.merge_strategy.debug {
+                debug!("Applying config source: {} (priority: {:?})", source.description, source.priority);
+            }
+            
+            current_config = current_config.add_source(source.data.clone());
+        }
+        
+        // 构建最终配置
+        let config = current_config
+            .build()
+            .map_err(|e| ConfigError::LoadFailed(format!("Failed to build merged config: {}", e)))?;
+        
+        Ok(config)
+    }
+     /// 从数据库加载配置
+    async fn load_database_config_async(&self, pool: &Pool<Postgres>) -> ConfigResult<Option<Config>> {
+        // 这里假设有一个configurations表，结构如下：
+        // CREATE TABLE configurations (
+        //     id SERIAL PRIMARY KEY,
+        //     config_key VARCHAR(255) NOT NULL,
+        //     config_value TEXT,
+        //     config_type VARCHAR(50) NOT NULL, -- 'string', 'number', 'boolean', 'json'
+        //     environment VARCHAR(50) NOT NULL DEFAULT 'default',
+        //     priority INTEGER NOT NULL DEFAULT 100,
+        //     is_active BOOLEAN NOT NULL DEFAULT true,
+        //     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        //     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        // );
+        
+        let result = sqlx::query(
+            r#"
+            SELECT config_key, config_value, config_type, environment, priority
+            FROM configurations
+            WHERE (environment = $1 OR environment = 'default')
+            AND is_active = true
+            ORDER BY environment DESC, priority DESC
+            "#
+        )
+        .bind(&self.environment)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| ConfigError::LoadFailed(format!("Failed to load database config: {}", e)))?;
+        
+        if result.is_empty() {
+            return Ok(None);
+        }
+        
+        // 构建配置
+        let mut config_map = HashMap::new();
+        
+        for row in result {
+            let key: String = row.get("config_key");
+            let value: String = row.get("config_value");
+            let config_type: String = row.get("config_type");
+            let _environment: String = row.get("environment");
+            let _priority: i32 = row.get("priority");
+            
+            match config_type.as_str() {
+                "string" => {
+                    config_map.insert(key, value);
+                }
+                "number" => {
+                    if let Ok(num) = value.parse::<i64>() {
+                        config_map.insert(key, num.to_string());
+                    } else if let Ok(num) = value.parse::<f64>() {
+                        config_map.insert(key, num.to_string());
+                    }
+                }
+                "boolean" => {
+                    config_map.insert(key, value.to_lowercase());
+                }
+                "json" => {
+                    config_map.insert(key, value);
+                }
+                _ => {
+                    config_map.insert(key, value);
+                }
+            }
+        }
+        
+        // 将配置转换为TOML格式
+        let toml_string = toml::to_string(&config_map)
+            .map_err(|e| ConfigError::SerializationFailed(format!("Failed to serialize database config: {}", e)))?;
+        
+        // 构建config::Config
+        let config = Config::builder()
+            .add_source(File::from_str(&toml_string, FileFormat::Toml))
+            .build()
+            .map_err(|e| ConfigError::LoadFailed(format!("Failed to build database config: {}", e)))?;
+        
+        Ok(Some(config))
+    }
     
-    /// 添加环境变量源
-    fn add_env_source(
-        &self,
-        builder: &mut config::ConfigBuilder<config::builder::DefaultState>,
-        prefix: &str,
-        separator: &str,
-    ) {
-        info!("Adding environment variable source with prefix: {}", prefix);
-        builder.add_source(Environment::with_prefix(prefix).separator(separator));
+    /// 同步版本：从数据库加载配置
+    fn load_database_config(&self, pool: &Arc<Pool<Postgres>>) -> ConfigResult<Option<Config>> {
+        // 注意：这里使用了tokio的block_on，在生产环境中应该使用异步方法
+        // TODO 这里为了简化，假设已经在tokio运行时中
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| ConfigError::LoadFailed("Not in tokio runtime".to_string()))?;
+        
+        runtime.block_on(async {
+            self.load_database_config_async(pool).await
+        })
+    }
+     /// 记录配置摘要
+    fn log_config_summary(&self, config: &AppConfig) {
+        debug!("Configuration summary:");
+        debug!("  Server: {}:{}", config.server.host, config.server.port);
+        debug!("  Database: {}", config.database.url);
+        debug!("  Redis: {}", config.redis.url);
+        debug!("  Environment: {}", self.environment);
+        debug!("  Sources applied: {}", self.sources.len());
+        
+        // 记录每个源的优先级
+        for source in &self.sources {
+            debug!("    - {} (priority: {:?})", source.description, source.priority);
+        }
+    }
+    /// 重新加载数据库配置
+    pub fn reload_database_config(&mut self) -> ConfigResult<()> {
+        if let Some(_) = &self.db_pool {
+            // 清除现有的数据库配置源
+            self.sources.retain(|s| s.source_type != ConfigSourceType::Database);
+            
+            // 重新加载数据库配置
+            self.add_database_source()?;
+            
+            // 更新最后更新时间
+            *self.last_update_time.write() = Utc::now();
+            
+            info!("Database configuration reloaded");
+        }
+        
+        Ok(())
+    }
+    /// 获取配置源信息
+    pub fn get_source_info(&self) -> Vec<ConfigSourceInfo> {
+        self.sources.iter().map(|source| {
+            ConfigSourceInfo {
+                source_type: source.source_type,
+                priority: source.priority,
+                timestamp: source.timestamp,
+                description: source.description.clone(),
+            }
+        }).collect()
+    }
+    /// 获取数据库配置缓存
+    pub fn get_database_config_cache(&self) -> Option<AppConfig> {
+        self.db_config_cache.read().clone()
+    }
+    
+    /// 清除数据库配置缓存
+    pub fn clear_database_config_cache(&self) {
+        *self.db_config_cache.write() = None;
+    }
+     /// 检查配置是否需要重新加载
+    pub fn should_reload(&self, interval_seconds: u64) -> bool {
+        let last_update = *self.last_update_time.read();
+        let now = Utc::now();
+        let duration = now - last_update;
+        
+        duration.num_seconds() >= interval_seconds as i64
     }
 }
 
@@ -224,292 +496,11 @@ impl Default for ConfigLoader {
     }
 }
 
-/// 配置管理器
+/// 配置源信息
 #[derive(Debug, Clone)]
-pub struct ConfigManager {
-    config: Arc<RwLock<AppConfig>>,
-    loader: ConfigLoader,
-}
-
-impl ConfigManager {
-    /// 创建新的配置管理器（自动解密敏感配置）
-    pub fn new() -> ConfigResult<Self> {
-        let mut loader = ConfigLoader::new();
-        let config = loader.load()?;
-          // 初始化全局加密器
-        init_global_encryptor()?;
-         // 解密敏感配置
-        let mut decrypted_config = config.clone();
-        let encryptor = get_global_encryptor()?;
-        encryptor.decrypt_config(&mut decrypted_config)?;
-
-         // 验证解密后的配置
-        let validator = crate::validator::ConfigValidator::new();
-        validator.validate(&decrypted_config)?;
-
-       Ok(Self {
-            config: Arc::new(RwLock::new(decrypted_config)),
-            loader,
-        })
-    }
-    
-     /// 从指定环境创建配置管理器（自动解密敏感配置）
-    pub fn with_environment(env: &str) -> ConfigResult<Self> {
-       let mut loader = ConfigLoader::new();
-        loader.set_environment(env);
-        let config = loader.load()?;
-        
-        // 初始化全局加密器
-        init_global_encryptor()?;
-        
-        // 解密敏感配置
-        let mut decrypted_config = config.clone();
-        let encryptor = get_global_encryptor()?;
-        encryptor.decrypt_config(&mut decrypted_config)?;
-        
-        // 验证解密后的配置
-        let validator = crate::validator::ConfigValidator::new();
-        validator.validate(&decrypted_config)?;
-        
-        Ok(Self {
-            config: Arc::new(RwLock::new(decrypted_config)),
-            loader,
-        })
-    }
-    
-    /// 获取当前配置
-    pub fn get_config(&self) -> AppConfig {
-        self.config.read().clone()
-    }
-    
-    /// 获取配置引用
-    pub fn get_config_ref(&self) -> std::sync::RwLockReadGuard<'_, AppConfig> {
-        self.config.read()
-    }
-    
-    /// 重新加载配置（自动解密敏感配置）
-    pub fn reload(&mut self) -> ConfigResult<()> {
-       info!("Reloading configuration");
-        
-        let new_config = self.loader.load()?;
-        
-        // 解密敏感配置
-        let mut decrypted_config = new_config.clone();
-        let encryptor = get_global_encryptor()?;
-        encryptor.decrypt_config(&mut decrypted_config)?;
-        
-        // 验证解密后的配置
-        let validator = crate::validator::ConfigValidator::new();
-        validator.validate(&decrypted_config)?;
-        
-        *self.config.write() = decrypted_config;
-        
-        info!("Configuration reloaded successfully");
-        Ok(())
-    }
-    
-    /// 更新配置
-    pub fn update_config<F>(&self, updater: F) -> ConfigResult<()>
-    where
-        F: FnOnce(&mut AppConfig),
-    {
-        let mut config = self.config.write();
-        updater(&mut config);
-        Ok(())
-    }
-    
-    /// 获取配置值
-    pub fn get_value<T: serde::de::DeserializeOwned>(&self, key: &str) -> ConfigResult<T> {
-        let config = self.config.read();
-        
-        // 尝试从扩展配置中获取
-        if let Some(value) = config.extensions.get(key) {
-            return serde_json::from_value(value.clone())
-                .map_err(|e| ConfigError::ValueNotFound(format!("Failed to deserialize value for key {}: {}", key, e)));
-        }
-        
-        // 这里可以实现从主配置中获取值的逻辑
-        // 由于配置结构复杂，需要实现特定的解析逻辑
-        
-        Err(ConfigError::ValueNotFound(format!("Config key not found: {}", key)))
-    }
-    
-    /// 设置配置值
-    pub fn set_value<T: serde::Serialize>(&self, key: &str, value: T) -> ConfigResult<()> {
-        let mut config = self.config.write();
-        config.set_extension(key, value);
-        Ok(())
-    }
-    
-    /// 导出配置到文件（自动加密敏感配置）
-    pub fn export_to_file<P: AsRef<Path>>(&self, path: P) -> ConfigResult<()> {
-         let config = self.config.read().clone();
-        
-        // 加密敏感配置
-        let mut encrypted_config = config.clone();
-        let encryptor = get_global_encryptor()?;
-        encryptor.encrypt_config(&mut encrypted_config)?;
-        
-        let toml = toml::to_string_pretty(&encrypted_config)
-            .map_err(|e| ConfigError::SerializationFailed(format!("Failed to serialize config: {}", e)))?;
-        
-        std::fs::write(path, toml)
-            .map_err(|e| ConfigError::IoError(format!("Failed to write config file: {}", e)))?;
-        
-        info!("Configuration exported to file with encryption");
-        Ok(())
-    }
-    
-     /// 导入配置从文件（自动解密敏感配置）
-    pub fn import_from_file<P: AsRef<Path>>(&self, path: P) -> ConfigResult<()> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| ConfigError::IoError(format!("Failed to read config file: {}", e)))?;
-        
-        let new_config: AppConfig = toml::from_str(&content)
-            .map_err(|e| ConfigError::DeserializationFailed(format!("Failed to deserialize config: {}", e)))?;
-        
-        // 解密敏感配置
-        let mut decrypted_config = new_config.clone();
-        let encryptor = get_global_encryptor()?;
-        encryptor.decrypt_config(&mut decrypted_config)?;
-        
-        // 验证解密后的配置
-        let validator = crate::validator::ConfigValidator::new();
-        validator.validate(&decrypted_config)?;
-        
-        *self.config.write() = decrypted_config;
-        
-        info!("Configuration imported from file and decrypted");
-        Ok(())
-    }
-    
-    /// 验证配置
-    pub fn validate(&self) -> ConfigResult<()> {
-        let config = self.config.read();
-        config.validate()
-            .map_err(|e| ConfigError::ValidationFailed(format!("Config validation failed: {}", e)))?;
-        
-        Ok(())
-    }
-    
-    /// 获取环境信息
-    pub fn environment(&self) -> String {
-        self.loader.environment.clone()
-    }
-    
-    /// 检查配置是否已加载
-    pub fn is_loaded(&self) -> bool {
-        !self.config.read().server.host.is_empty()
-    }
-    /// 获取配置值的加密版本
-    pub fn get_encrypted_value(&self, key: &str) -> ConfigResult<String> {
-        let config = self.config.read();
-        
-        // 根据key路径获取配置值
-        let value = self.get_value_by_path(key)?;
-        
-        // 加密值
-        let encryptor = get_global_encryptor()?;
-        
-        // 根据key确定安全级别
-        let security_level = self.determine_security_level(key);
-        
-        encryptor.encrypt_config_value(key, &value, security_level)
-    }
-    
-    /// 根据路径获取配置值
-    fn get_value_by_path(&self, path: &str) -> ConfigResult<String> {
-        let config = self.config.read();
-        let parts: Vec<&str> = path.split('.').collect();
-        
-        match parts.as_slice() {
-            ["database", "url"] => Ok(config.database.url.clone()),
-            ["redis", "password"] => Ok(config.redis.password.clone().unwrap_or_default()),
-            ["jwt", "secret"] => Ok(config.jwt.secret.clone()),
-            ["encryption", "key"] => Ok(config.encryption.key.clone()),
-            // 添加更多路径匹配...
-            _ => {
-                // 尝试从扩展配置中获取
-                if let Some(value) = config.extensions.get(path) {
-                    if let serde_json::Value::String(s) = value {
-                        Ok(s.clone())
-                    } else {
-                        Ok(value.to_string())
-                    }
-                } else {
-                    Err(ConfigError::ValueNotFound(format!("Config path not found: {}", path)))
-                }
-            }
-        }
-    }
-    
-    /// 根据key确定安全级别
-    fn determine_security_level(&self, key: &str) -> ConfigSecurityLevel {
-        if key.contains("secret") || key.contains("key") || key.contains("token") {
-            ConfigSecurityLevel::Secret
-        } else if key.contains("password") || key.contains("credential") {
-            ConfigSecurityLevel::Sensitive
-        } else if key.contains("access_key") || key.contains("api_key") {
-            ConfigSecurityLevel::Internal
-        } else {
-            ConfigSecurityLevel::Public
-        }
-    }
-
-}
-
-// 全局配置实例
-lazy_static::lazy_static! {
-    static ref GLOBAL_CONFIG: parking_lot::RwLock<Option<ConfigManager>> = parking_lot::RwLock::new(None);
-}
-
-/// 初始化全局配置
-pub fn init_global_config() -> ConfigResult<()> {
-    let mut global_config = GLOBAL_CONFIG.write();
-    if global_config.is_none() {
-        *global_config = Some(ConfigManager::new()?);
-    }
-    Ok(())
-}
-
-/// 初始化全局配置（指定环境）
-pub fn init_global_config_with_env(env: &str) -> ConfigResult<()> {
-    let mut global_config = GLOBAL_CONFIG.write();
-    if global_config.is_none() {
-        *global_config = Some(ConfigManager::with_environment(env)?);
-    }
-    Ok(())
-}
-
-/// 获取全局配置
-pub fn get_global_config() -> ConfigResult<ConfigManager> {
-    let global_config = GLOBAL_CONFIG.read();
-    global_config.as_ref()
-        .cloned()
-        .ok_or_else(|| ConfigError::NotInitialized("Global config not initialized".to_string()))
-}
-
-/// 重新加载全局配置
-pub fn reload_global_config() -> ConfigResult<()> {
-    let mut global_config = GLOBAL_CONFIG.write();
-    if let Some(config) = global_config.as_mut() {
-        config.reload()
-    } else {
-        Err(ConfigError::NotInitialized("Global config not initialized".to_string()))
-    }
-}
-
-/// 便捷函数：加载配置
-pub fn load_config() -> ConfigResult<AppConfig> {
-    get_global_config()?.get_config()
-}
-
-/// 便捷函数：获取配置值
-pub fn get_config<T: serde::de::DeserializeOwned>(key: &str) -> ConfigResult<T> {
-    get_global_config()?.get_value(key)
-}
-
-/// 便捷函数：设置配置值
-pub fn set_config<T: serde::Serialize>(key: &str, value: T) -> ConfigResult<()> {
-    get_global_config()?.set_value(key, value)
+pub struct ConfigSourceInfo {
+    pub source_type: ConfigSourceType,
+    pub priority: ConfigPriority,
+    pub timestamp: chrono::DateTime<Utc>,
+    pub description: String,
 }

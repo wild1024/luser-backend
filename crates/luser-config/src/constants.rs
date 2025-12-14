@@ -78,9 +78,7 @@ pub const CONFIG_AUDIT_LOG_FILE: &str = "./logs/config-audit.log";
 /// 配置版本
 pub const CONFIG_VERSION: &str = "1.0.0";
 
-/// 加密算法常量
-pub const ENCRYPTION_ALGORITHM_AES_GCM: &str = "aes-256-gcm";
-pub const ENCRYPTION_ALGORITHM_CHACHA20: &str = "chacha20-poly1305";
+
 
 /// 加密密钥长度（字节）
 pub const ENCRYPTION_KEY_LENGTH: usize = 32;
@@ -95,88 +93,6 @@ pub const ENCRYPTION_SUFFIX: &str = "]";
 pub const KEY_ROTATION_INTERVAL_DAYS: u32 = 90;
 pub const KEY_BACKUP_COUNT: usize = 3;
 
-/// 敏感配置字段模式
-pub const SENSITIVE_FIELD_PATTERNS: [&str; 8] = [
-    "password",
-    "secret",
-    "key",
-    "token",
-    "credential",
-    "private",
-    "certificate",
-    "signature",
-];
-
-/// 配置模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigMode {
-    /// 开发模式
-    Development,
-    /// 测试模式
-    Test,
-    /// 预发布模式
-    Staging,
-    /// 生产模式
-    Production,
-}
-
-impl ConfigMode {
-    /// 从字符串解析配置模式
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "development" | "dev" => Some(Self::Development),
-            "test" | "testing" => Some(Self::Test),
-            "staging" | "stage" => Some(Self::Staging),
-            "production" | "prod" => Some(Self::Production),
-            _ => None,
-        }
-    }
-    
-    /// 转换为字符串
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Development => "development",
-            Self::Test => "test",
-            Self::Staging => "staging",
-            Self::Production => "production",
-        }
-    }
-    
-    /// 检查是否开发模式
-    pub fn is_development(&self) -> bool {
-        matches!(self, Self::Development)
-    }
-    
-    /// 检查是否测试模式
-    pub fn is_test(&self) -> bool {
-        matches!(self, Self::Test)
-    }
-    
-    /// 检查是否预发布模式
-    pub fn is_staging(&self) -> bool {
-        matches!(self, Self::Staging)
-    }
-    
-    /// 检查是否生产模式
-    pub fn is_production(&self) -> bool {
-        matches!(self, Self::Production)
-    }
-    
-    /// 获取配置目录
-    pub fn config_dir(&self) -> String {
-        format!("./config/{}", self.as_str())
-    }
-    
-    /// 获取日志级别
-    pub fn log_level(&self) -> &'static str {
-        match self {
-            Self::Development => "debug",
-            Self::Test => "info",
-            Self::Staging => "info",
-            Self::Production => "warn",
-        }
-    }
-}
 
 /// 配置源类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,6 +107,8 @@ pub enum ConfigSourceType {
     Remote,
     /// 数据库配置源
     Database,
+    /// 自定义配置源 
+    Custom,
     /// 默认配置源
     Default,
 }
@@ -204,22 +122,26 @@ impl ConfigSourceType {
             Self::CommandLine => "command_line",
             Self::Remote => "remote",
             Self::Database => "database",
+            Self::Custom => "custom",
             Self::Default => "default",
+
         }
     }
     
     /// 获取源优先级（数值越小优先级越高）
     pub fn priority(&self) -> u8 {
         match self {
-            Self::CommandLine => 1,
-            Self::Environment => 2,
-            Self::File => 3,
-            Self::Remote => 4,
-            Self::Database => 5,
-            Self::Default => 6,
+            Self::Remote => 1,
+            Self::Database => 2,
+            Self::Custom => 3,
+            Self::CommandLine => 4,
+            Self::Environment => 5,
+            Self::File => 6,
+            Self::Default => 7,
         }
     }
 }
+
 
 /// 配置变更类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,43 +211,6 @@ impl ConfigSecurityLevel {
     }
 }
 
-/// 配置存储后端
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigStorageBackend {
-    /// 文件系统存储
-    FileSystem,
-    /// Redis存储
-    Redis,
-    /// 数据库存储
-    Database,
-    /// 内存存储
-    Memory,
-    /// 云存储
-    Cloud,
-}
-
-impl ConfigStorageBackend {
-    /// 获取后端名称
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::FileSystem => "filesystem",
-            Self::Redis => "redis",
-            Self::Database => "database",
-            Self::Memory => "memory",
-            Self::Cloud => "cloud",
-        }
-    }
-    
-    /// 检查是否支持持久化
-    pub fn supports_persistence(&self) -> bool {
-        !matches!(self, Self::Memory)
-    }
-    
-    /// 检查是否支持分布式
-    pub fn supports_distributed(&self) -> bool {
-        matches!(self, Self::Redis | Self::Database | Self::Cloud)
-    }
-}
 
 /// 配置常量工具函数
 pub struct ConfigConstants;

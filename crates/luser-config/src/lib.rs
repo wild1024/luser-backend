@@ -7,37 +7,36 @@
 #![warn(rustdoc::missing_doc_code_examples)]
 
 mod config;
+mod database;
 mod loader;
+mod manager;
+mod merger;
 mod validator;
 mod encryption;
-mod watcher;
-mod cache;
 mod error;
 mod constants;
-mod utils;
 mod tests;
 
 pub use config::*;
 pub use loader::*;
+pub use manager::*;
+pub use merger::*;
 pub use validator::*;
 pub use encryption::*;
-pub use watcher::*;
-pub use cache::*;
+pub use database::*;
 pub use error::*;
 pub use constants::*;
-pub use utils::*;
 
 /// 重新导出常用的配置类型和函数
 pub mod prelude {
     pub use crate::{
-        AppConfig, ConfigLoader, ConfigValidator, ConfigWatcher,
-        ConfigError, ConfigResult, load_config, get_config,
+        AppConfig, ConfigLoader, ConfigManager, ConfigValidator,
+        ConfigError, ConfigResult, ConfigSourceType, load_config, get_config,init_global_encryptor, get_global_encryptor,
         DEFAULT_CONFIG_PATH, ENV_PREFIX,
     };
 }
 
-/// 生成构建信息
-include!(concat!(env!("OUT_DIR"), "/built.rs"));
+
 
 /// 模块版本信息
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

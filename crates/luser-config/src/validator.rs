@@ -1,6 +1,6 @@
 use validator::Validate;
 use tracing::{info, warn, error};
-use crate::{AppConfig, ConfigResult, ConfigError};
+use crate::{AppConfig, ConfigError, ConfigResult, DEFAULT_RUN_MODE, RUN_MODE_ENV};
 
 /// 配置验证器
 #[derive(Debug, Clone)]
@@ -216,7 +216,7 @@ impl ConfigValidator {
     /// 验证环境特定的规则
     fn validate_environment_specific(&self, config: &AppConfig) -> ConfigResult<()> {
         // 开发环境警告
-        if std::env::var("RUN_MODE").unwrap_or_default() == "development" {
+        if std::env::var(RUN_MODE_ENV).unwrap_or_default() == DEFAULT_RUN_MODE {
             // 开发环境使用弱密码警告
             if config.jwt.secret == "your-super-secret-jwt-key-change-in-production" {
                 warn!("Using default JWT secret in development mode");
@@ -228,7 +228,7 @@ impl ConfigValidator {
         }
         
         // 生产环境检查
-        if std::env::var("RUN_MODE").unwrap_or_default() == "production" {
+        if std::env::var(RUN_MODE_ENV).unwrap_or_default() == "production" {
             // 生产环境必须使用HTTPS
             if !config.server.enable_https {
                 return Err(ConfigError::ValidationFailed(
@@ -471,7 +471,7 @@ pub fn validate_config(config: &AppConfig) -> ConfigResult<ValidationReport> {
     
     match validator.validate(config) {
         Ok(_) => {
-            let report = validator.generate_validation_report(config);
+            let report = ConfigValidator::generate_validation_report(config);
             if !report.is_passed() {
                 warn!("Config validation completed with warnings: {}", report.summary());
             } else {
