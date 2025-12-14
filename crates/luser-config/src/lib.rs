@@ -15,6 +15,7 @@ mod validator;
 mod encryption;
 mod error;
 mod constants;
+mod watcher;
 mod tests;
 
 pub use config::*;
@@ -26,12 +27,17 @@ pub use encryption::*;
 pub use database::*;
 pub use error::*;
 pub use constants::*;
+pub use watcher::*;
 
 /// 重新导出常用的配置类型和函数
 pub mod prelude {
     pub use crate::{
-        AppConfig, ConfigLoader, ConfigManager, ConfigValidator,
-        ConfigError, ConfigResult, ConfigSourceType, load_config, get_config,init_global_encryptor, get_global_encryptor,
+        AppConfig, ConfigLoader, ConfigManager, ConfigValidator, ConfigWatcher,
+        ConfigMerger, DatabaseConfigWatcher,
+        ConfigError, ConfigResult, ConfigPriority, ConfigSourceType, 
+        load_config, get_config,
+        init_global_config, 
+        get_global_encryptor,
         DEFAULT_CONFIG_PATH, ENV_PREFIX,
     };
 }

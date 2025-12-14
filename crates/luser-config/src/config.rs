@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 use std::collections::HashMap;
 use std::time::Duration;
-use crate::ConfigLoader;
+use crate::ConfigError;
 use crate::error::ConfigResult;
 
 /// 应用主配置
@@ -2591,53 +2591,66 @@ impl AppConfig {
         }
     }
     
-    /// 获取环境特定的配置
-    pub fn for_environment(env: &str) -> ConfigResult<Self> {
-        let mut loader = ConfigLoader::new();
-        loader.set_environment(env);
-        loader.load()
+    /// 检查配置值是否已加密
+    pub fn is_encrypted(&self, key_path: &str) -> bool {
+        // 尝试从全局加密器检查
+        if let Ok(encryptor) = crate::encryption::get_global_encryptor() {
+            let value = self.get_value_by_path(key_path);
+            if let Ok(value_str) = value {
+                return encryptor.is_encrypted_value(&value_str);
+            }
+        }
+        false
     }
-    
-   /// 从环境变量加载配置（自动解密）
-    pub fn from_env() -> ConfigResult<Self> {
-        let mut loader = ConfigLoader::new();
-        let config = loader.load_from_env()?;
+    /// 根据路径获取配置值
+    fn get_value_by_path(&self, path: &str) -> ConfigResult<String> {
+        let parts: Vec<&str> = path.split('.').collect();
         
-        // 初始化全局加密器
-        crate::encryption::init_global_encryptor()?;
-        
-        // 解密敏感配置
-        let mut decrypted_config = config.clone();
-        let encryptor = crate::encryption::get_global_encryptor()?;
-        encryptor.decrypt_config(&mut decrypted_config)?;
-        
-        // 验证解密后的配置
-        let validator = crate::validator::ConfigValidator::new();
-        validator.validate(&decrypted_config)?;
-        
-        Ok(decrypted_config)
+        match parts.as_slice() {
+            ["database", "url"] => Ok(self.database.url.clone()),
+            ["redis", "password"] => Ok(self.redis.password.clone().unwrap_or_default()),
+            ["redis", "url"] => Ok(self.redis.url.clone()),
+            ["jwt", "secret"] => Ok(self.jwt.secret.clone()),
+            ["encryption", "key"] => Ok(self.encryption.key.clone()),
+            ["security", "signing_key"] => Ok(self.security.signing_key.clone().unwrap_or_default()),
+            ["email", "password"] => Ok(self.email.password.clone().unwrap_or_default()),
+            ["sms", "access_key_secret"] => Ok(self.sms.access_key_secret.clone().unwrap_or_default()),
+            // 云服务配置
+            ["cloud_service", "tencent", "secret_id"] => Ok(self.cloud_service.tencent.secret_id.clone().unwrap_or_default()),
+            ["cloud_service", "tencent", "secret_key"] => Ok(self.cloud_service.tencent.secret_key.clone().unwrap_or_default()),
+            ["cloud_service", "aliyun", "access_key_id"] => Ok(self.cloud_service.aliyun.access_key_id.clone().unwrap_or_default()),
+            ["cloud_service", "aliyun", "access_key_secret"] => Ok(self.cloud_service.aliyun.access_key_secret.clone().unwrap_or_default()),
+            ["cloud_service", "aws", "access_key_id"] => Ok(self.cloud_service.aws.access_key_id.clone().unwrap_or_default()),
+            ["cloud_service", "aws", "secret_access_key"] => Ok(self.cloud_service.aws.secret_access_key.clone().unwrap_or_default()),
+            ["cloud_service", "huawei", "access_key_id"] => Ok(self.cloud_service.huawei.access_key_id.clone().unwrap_or_default()),
+            ["cloud_service", "huawei", "secret_access_key"] => Ok(self.cloud_service.huawei.secret_access_key.clone().unwrap_or_default()),
+            // 存储配置
+            ["storage", "s3", "access_key_id"] => Ok(self.storage.s3.access_key_id.clone().unwrap_or_default()),
+            ["storage", "s3", "secret_access_key"] => Ok(self.storage.s3.secret_access_key.clone().unwrap_or_default()),
+            // 队列配置
+            ["queue", "sqs", "secret_access_key"] => Ok(self.queue.sqs.secret_access_key.clone().unwrap_or_default()),
+            // 支付配置（需要遍历channels）
+            ["payment", channel, "private_key"] => {
+                if let Some(channel_config) = self.payment.channels.get(*channel) {
+                    Ok(channel_config.private_key.clone())
+                } else {
+                    Err(ConfigError::ValueNotFound(format!("Payment channel not found: {}", channel)))
+                }
+            }
+            // 扩展配置
+            _ => {
+                if let Some(value) = self.extensions.get(path) {
+                    if let serde_json::Value::String(s) = value {
+                        Ok(s.clone())
+                    } else {
+                        Ok(value.to_string())
+                    }
+                } else {
+                    Err(ConfigError::ValueNotFound(format!("Config path not found: {}", path)))
+                }
+            }
+        }
     }
-    
-    /// 从文件加载配置（自动解密）
-    pub fn from_file(path: &str) -> ConfigResult<Self> {
-        let mut loader = ConfigLoader::new();
-        let config = loader.load_from_file(path)?;
-        
-        // 初始化全局加密器
-        crate::encryption::init_global_encryptor()?;
-        
-        // 解密敏感配置
-        let mut decrypted_config = config.clone();
-        let encryptor = crate::encryption::get_global_encryptor()?;
-        encryptor.decrypt_config(&mut decrypted_config)?;
-        
-        // 验证解密后的配置
-        let validator = crate::validator::ConfigValidator::new();
-        validator.validate(&decrypted_config)?;
-        
-        Ok(decrypted_config)
-    }
-    
     /// 加密敏感配置
     pub fn encrypt_sensitive_fields(&mut self) -> ConfigResult<()> {
         crate::encryption::init_global_encryptor()?;
@@ -2690,13 +2703,6 @@ impl AppConfig {
         } else {
             Ok(self.jwt.secret.clone())
         }
-    }
-    
-    /// 合并两个配置
-    pub fn merge(&mut self, other: Self) {
-        // 这里可以实现配置合并逻辑
-        // 由于配置结构复杂，这里只实现简单的覆盖逻辑
-        *self = other;
     }
     
     /// 获取扩展配置

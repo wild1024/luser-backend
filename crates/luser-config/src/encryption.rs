@@ -72,6 +72,7 @@ pub struct EncryptionManager {
     algorithm: EncryptionAlgorithm,
     key: Arc<RwLock<Vec<u8>>>,
     nonce_generator: Arc<dyn NonceGenerator>,
+    key_manager: Option<Arc<RwLock<KeyManager>>>,
 }
 
 /// Nonce生成器
@@ -124,9 +125,34 @@ impl EncryptionManager {
             algorithm,
             key: Arc::new(RwLock::new(key)),
             nonce_generator: Arc::new(SecureNonceGenerator),
+            key_manager: None, // 初始化为 None
         })
     }
+    /// 创建新的加密管理器（带密钥管理）
+    pub fn new_with_key_manager(
+        algorithm: EncryptionAlgorithm,
+        key: Vec<u8>,
+        rotation_interval: std::time::Duration,
+    ) -> ConfigResult<Self> {
+        // 验证密钥长度
+        if key.len() != algorithm.key_length() {
+            return Err(ConfigError::EncryptionError(format!(
+                "Invalid key length: expected {}, got {}",
+                algorithm.key_length(),
+                key.len()
+            )));
+        }
 
+        // 创建 KeyManager
+        let key_manager = KeyManager::new(key.clone(), rotation_interval)?;
+
+        Ok(Self {
+            algorithm,
+            key: Arc::new(RwLock::new(key)),
+            nonce_generator: Arc::new(SecureNonceGenerator),
+            key_manager: Some(Arc::new(RwLock::new(key_manager))),
+        })
+    }
     /// 从base64编码的密钥创建加密管理器
     pub fn from_base64_key(algorithm: EncryptionAlgorithm, base64_key: &str) -> ConfigResult<Self> {
         let key = STANDARD.decode(base64_key).map_err(|e| {
@@ -165,7 +191,12 @@ impl EncryptionManager {
     /// 加密数据
     #[instrument(skip(self, plaintext))]
     pub fn encrypt(&self, plaintext: &[u8]) -> ConfigResult<Vec<u8>> {
-        let key = self.key.read();
+        // 如果有 KeyManager，使用其当前密钥
+        let key = if let Some(key_manager) = &self.key_manager {
+            key_manager.read().get_current_key()
+        } else {
+            self.key.read().clone()
+        };
 
         match self.algorithm {
             EncryptionAlgorithm::Aes256Gcm => self.encrypt_aes_gcm(&key, plaintext),
@@ -184,8 +215,12 @@ impl EncryptionManager {
     /// 解密数据
     #[instrument(skip(self, ciphertext))]
     pub fn decrypt(&self, ciphertext: &[u8]) -> ConfigResult<Vec<u8>> {
-        let key = self.key.read();
-
+        // 如果有 KeyManager，使用其当前密钥
+        let key = if let Some(key_manager) = &self.key_manager {
+            key_manager.read().get_current_key()
+        } else {
+            self.key.read().clone()
+        };
         match self.algorithm {
             EncryptionAlgorithm::Aes256Gcm => self.decrypt_aes_gcm(&key, ciphertext),
             EncryptionAlgorithm::ChaCha20Poly1305 => {
@@ -210,19 +245,22 @@ impl EncryptionManager {
     }
 
     /// 轮换密钥
-    pub fn rotate_key(&self, new_key: Vec<u8>) -> ConfigResult<()> {
-        if new_key.len() != self.algorithm.key_length() {
-            return Err(ConfigError::EncryptionError(format!(
-                "Invalid key length: expected {}, got {}",
-                self.algorithm.key_length(),
-                new_key.len()
-            )));
+    pub fn rotate_key(&self) -> ConfigResult<String> {
+        if let Some(key_manager) = &self.key_manager {
+            let mut key_manager = key_manager.write();
+            let new_key_id = key_manager.rotate_key()?;
+
+            // 重要：更新 EncryptionManager 的当前密钥
+            let new_key = key_manager.get_current_key();
+            *self.key.write() = new_key;
+
+            info!("Encryption key rotated successfully: {}", new_key_id);
+            Ok(new_key_id)
+        } else {
+            Err(ConfigError::EncryptionError(
+                "Key management is not enabled".to_string(),
+            ))
         }
-
-        *self.key.write() = new_key;
-        info!("Encryption key rotated successfully");
-
-        Ok(())
     }
 
     /// 获取当前密钥（base64编码）
@@ -285,7 +323,7 @@ impl EncryptionManager {
 
     /// ChaCha20-Poly1305加密
     fn encrypt_chacha20_poly1305(&self, key: &[u8], plaintext: &[u8]) -> ConfigResult<Vec<u8>> {
-        // 注意：这里使用AES-GCM作为替代，实际项目中应该实现ChaCha20-Poly1305
+        // TODO 注意：这里使用AES-GCM作为替代，实际项目中应该实现ChaCha20-Poly1305
         // 由于依赖库限制，这里使用AES-GCM
         warn!("ChaCha20-Poly1305 not implemented, using AES-GCM instead");
         self.encrypt_aes_gcm(key, plaintext)
@@ -293,7 +331,7 @@ impl EncryptionManager {
 
     /// ChaCha20-Poly1305解密
     fn decrypt_chacha20_poly1305(&self, key: &[u8], ciphertext: &[u8]) -> ConfigResult<Vec<u8>> {
-        // 注意：这里使用AES-GCM作为替代，实际项目中应该实现ChaCha20-Poly1305
+        // TODO 注意：这里使用AES-GCM作为替代，实际项目中应该实现ChaCha20-Poly1305
         warn!("ChaCha20-Poly1305 not implemented, using AES-GCM instead");
         self.decrypt_aes_gcm(key, ciphertext)
     }
@@ -321,6 +359,25 @@ impl EncryptionManager {
         let actual_hash = self.hash_data(data)?;
         Ok(actual_hash == expected_hash)
     }
+    /// 获取 key_manager 方法
+    pub fn key_manager(&self) -> Option<Arc<RwLock<KeyManager>>> {
+        self.key_manager.clone()
+    }
+    /// 启用密钥管理
+    pub fn enable_key_management(
+        &mut self,
+        rotation_interval: std::time::Duration,
+    ) -> ConfigResult<()> {
+        if self.key_manager.is_some() {
+            return Ok(());
+        }
+
+        let key = self.key.read().clone();
+        let key_manager = KeyManager::new(key, rotation_interval)?;
+        self.key_manager = Some(Arc::new(key_manager.into()));
+
+        Ok(())
+    }
 }
 
 /// 配置加密器
@@ -341,7 +398,22 @@ impl ConfigEncryptor {
             ])),
         }
     }
-
+    /// 创建带密钥管理的加密器
+    pub fn new_with_key_manager(
+        algorithm: EncryptionAlgorithm,
+        key: Vec<u8>,
+        rotation_interval: std::time::Duration,
+    ) -> ConfigResult<Self> {
+        let encryption_manager =
+            EncryptionManager::new_with_key_manager(algorithm, key, rotation_interval)?;
+        Ok(Self {
+            encryption_manager: Arc::new(encryption_manager),
+            security_levels: Arc::new(RwLock::new(vec![
+                ConfigSecurityLevel::Sensitive,
+                ConfigSecurityLevel::Secret,
+            ])),
+        })
+    }
     /// 加密配置值
     pub fn encrypt_config_value(
         &self,
@@ -1323,6 +1395,21 @@ impl ConfigEncryptor {
     pub fn encryption_manager(&self) -> Arc<EncryptionManager> {
         self.encryption_manager.clone()
     }
+    /// 获取密钥管理器
+    pub fn key_manager(&self) -> Option<Arc<RwLock<KeyManager>>> {
+        self.encryption_manager.key_manager()
+    }
+    /// 启用密钥管理
+    pub fn enable_key_management(
+        &mut self,
+        rotation_interval: std::time::Duration,
+    ) -> ConfigResult<()> {
+        // 由于 EncryptionManager 是不可变的，我们需要创建新的实例
+        let mut encryption_manager = (*self.encryption_manager).clone();
+        encryption_manager.enable_key_management(rotation_interval)?;
+        self.encryption_manager = Arc::new(encryption_manager);
+        Ok(())
+    }
 }
 
 /// 便捷函数：加密配置值
@@ -1377,7 +1464,33 @@ pub fn init_global_encryptor() -> ConfigResult<()> {
     }
     Ok(())
 }
+/// 初始化全局加密器（带密钥管理）
+pub fn init_global_encryptor_with_key_manager(
+    rotation_interval: std::time::Duration,
+) -> ConfigResult<()> {
+    let mut global_encryptor = GLOBAL_ENCRYPTOR.write();
+    if global_encryptor.is_none() {
+        // 从环境变量获取加密密钥
+        let base64_key = std::env::var(ENCRYPTION_KEY_ENV).unwrap_or_else(|_| {
+            warn!("LUSER_ENCRYPTION_KEY not set, using default key");
+            EncryptionManager::generate_base64_key(EncryptionAlgorithm::Aes256Gcm)
+                .unwrap_or_else(|_| base64::encode(vec![0u8; 32]))
+        });
 
+        let key = STANDARD.decode(&base64_key).map_err(|e| {
+            ConfigError::EncryptionError(format!("Failed to decode base64 key: {}", e))
+        })?;
+
+        let encryptor = ConfigEncryptor::new_with_key_manager(
+            EncryptionAlgorithm::Aes256Gcm,
+            key,
+            rotation_interval,
+        )?;
+
+        *global_encryptor = Some(encryptor);
+    }
+    Ok(())
+}
 /// 获取全局加密器
 pub fn get_global_encryptor() -> ConfigResult<ConfigEncryptor> {
     let global_encryptor = GLOBAL_ENCRYPTOR.read();
@@ -1435,14 +1548,17 @@ impl KeyManager {
 
     /// 轮换密钥
     pub fn rotate_key(&self) -> ConfigResult<String> {
+        // 生成新密钥
         let new_key = EncryptionManager::generate_key(EncryptionAlgorithm::Aes256Gcm)?;
         let key_id = Self::generate_key_id();
 
         // 更新当前密钥
         *self.current_key.write() = new_key.clone();
 
-        // 将旧密钥标记为不活跃
+        // 将旧密钥添加到历史记录并标记为不活跃
         let mut history = self.key_history.write();
+
+        // 首先将所有密钥标记为不活跃
         for entry in history.iter_mut() {
             entry.active = false;
         }
@@ -1561,6 +1677,645 @@ impl KeyManager {
 
         *self.key_history.write() = history;
 
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ConfigManager;
+    use std::{env, time::Duration};
+    use tempfile::NamedTempFile;
+    /// 测试密钥生成
+    #[test]
+    fn test_key_generation() -> ConfigResult<()> {
+        // 1. 测试AES-256-GCM密钥生成
+        let aes_key = EncryptionManager::generate_key(EncryptionAlgorithm::Aes256Gcm)?;
+        assert_eq!(aes_key.len(), 32); // AES-256使用32字节密钥
+
+        let aes_base64 = EncryptionManager::generate_base64_key(EncryptionAlgorithm::Aes256Gcm)?;
+        let decoded_aes = STANDARD.decode(&aes_base64)?;
+        assert_eq!(decoded_aes.len(), 32);
+
+        // 2. 测试算法字符串转换
+        assert_eq!(EncryptionAlgorithm::Aes256Gcm.as_str(), "aes-256-gcm");
+        assert_eq!(
+            EncryptionAlgorithm::from_str("aes-256-gcm"),
+            Some(EncryptionAlgorithm::Aes256Gcm)
+        );
+        assert_eq!(EncryptionAlgorithm::from_str("invalid"), None);
+
+        Ok(())
+    }
+
+    /// 测试基本加密解密
+    #[test]
+    fn test_basic_encryption_decryption() -> ConfigResult<()> {
+        // 生成测试密钥
+        let test_key = EncryptionManager::generate_key(EncryptionAlgorithm::Aes256Gcm)?;
+
+        // 创建加密管理器
+        let manager = EncryptionManager::new(EncryptionAlgorithm::Aes256Gcm, test_key)?;
+
+        // 测试数据
+        let plaintext = "这是一个需要加密的敏感配置值，包含密码和密钥信息";
+
+        // 加密
+        let encrypted = manager.encrypt_string(plaintext)?;
+        println!("加密后的数据: {}", encrypted);
+
+        // 解密
+        let decrypted = manager.decrypt_string(&encrypted)?;
+        println!("解密后的数据: {}", decrypted);
+
+        // 验证
+        assert_eq!(decrypted, plaintext);
+        assert_ne!(encrypted, plaintext);
+
+        // 验证非加密数据
+        let non_encrypted = "plain text";
+        assert!(!manager.is_encrypted(non_encrypted));
+
+        Ok(())
+    }
+
+    /// 测试AES-GCM加密解密
+    #[test]
+    fn test_aes_gcm_encryption() -> ConfigResult<()> {
+        // 使用固定密钥进行测试
+        let key = vec![
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f,
+        ];
+
+        let manager = EncryptionManager::new(EncryptionAlgorithm::Aes256Gcm, key)?;
+
+        // 测试各种长度的数据
+        let test_cases = vec![
+            "",                             // 空字符串
+            "a",                            // 单个字符
+            "short",                        // 短字符串
+            "这是一个中等长度的测试字符串", // 中文
+            "This is a very long test string that contains multiple words and special characters: !@#$%^&*()_+{}|:\"<>?~`-=[]\\;',./", // 长字符串带特殊字符
+        ];
+
+        for (i, plaintext) in test_cases.iter().enumerate() {
+            println!("测试用例 {}: 长度 = {}", i, plaintext.len());
+
+            // 加密
+            let encrypted = manager.encrypt_string(plaintext)?;
+
+            // 验证密文不是明文
+            assert_ne!(&encrypted, plaintext);
+
+            // 解密
+            let decrypted = manager.decrypt_string(&encrypted)?;
+
+            // 验证解密结果
+            assert_eq!(&decrypted, plaintext);
+
+            // 验证是否能检测为加密数据
+            assert!(manager.is_encrypted(&encrypted));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_encryption_decryption() -> ConfigResult<()> {
+        // 设置测试环境变量
+        unsafe { env::set_var("LUSER_ENCRYPTION_KEY", base64::encode(vec![1u8; 32])) };
+
+        // 创建加密管理器
+        let encryption_manager =
+            EncryptionManager::from_env(EncryptionAlgorithm::Aes256Gcm, "LUSER_ENCRYPTION_KEY")?;
+
+        let encryptor = ConfigEncryptor::new(encryption_manager);
+
+        // 测试字符串加密解密
+        let plaintext = "my_secret_password";
+        let encrypted = encryptor.encrypt_config_value(
+            "test.password",
+            plaintext,
+            ConfigSecurityLevel::Sensitive,
+        )?;
+
+        assert!(encrypted.starts_with("ENC[sensitive:"));
+        assert!(encrypted.ends_with(']'));
+
+        let decrypted = encryptor.decrypt_config_value("test.password", &encrypted)?;
+        assert_eq!(decrypted, plaintext);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_encryption() -> ConfigResult<()> {
+        // 设置测试环境变量
+        unsafe { std::env::set_var("LUSER_ENCRYPTION_KEY", base64::encode(vec![1u8; 32])) };
+
+        // 创建测试配置
+        let mut config = crate::AppConfig::default();
+        config.database.url = "postgres://user:password@localhost:5432/db".to_string();
+        config.redis.password = Some("redis_password".to_string());
+        config.jwt.secret = "jwt_secret_key".to_string();
+
+        // 初始化加密器
+        init_global_encryptor()?;
+        let encryptor = get_global_encryptor()?;
+
+        // 保存原始值
+        let original_db_url = config.database.url.clone();
+        let original_redis_password = config.redis.password.clone();
+        let original_jwt_secret = config.jwt.secret.clone();
+
+        println!("\n=== 开始测试 ===");
+        println!("原始数据库URL: {}", original_db_url);
+
+        // 测试1: 单独测试数据库URL加密/解密
+        println!("\n1. 测试数据库URL加密/解密:");
+        let encrypted_url = encryptor.encrypt_database_url(&original_db_url)?;
+        println!("加密后URL: {}", encrypted_url);
+
+        let decrypted_url = encryptor.decrypt_database_url(&encrypted_url)?;
+        println!("解密后URL: {}", decrypted_url);
+        assert_eq!(decrypted_url, original_db_url, "数据库URL解密失败");
+
+        // 测试2: 加密整个配置
+        println!("\n2. 加密整个配置:");
+        encryptor.encrypt_config(&mut config)?;
+
+        println!("加密后数据库URL: {}", config.database.url);
+
+        // 验证配置已加密
+        assert_ne!(config.database.url, original_db_url);
+        assert!(
+            config.database.url.contains("ENC%5B")
+                || encryptor.is_encrypted_value(&config.database.url)
+        );
+
+        if let Some(ref redis_password) = config.redis.password {
+            assert!(redis_password.starts_with("ENC[sensitive:"));
+        }
+
+        assert!(config.jwt.secret.starts_with("ENC[secret:"));
+
+        // 测试3: 解密整个配置
+        println!("\n3. 解密整个配置:");
+        encryptor.decrypt_config(&mut config)?;
+
+        println!("解密后数据库URL: {}", config.database.url);
+
+        // 验证配置已正确解密
+        assert_eq!(config.database.url, original_db_url, "数据库URL解密失败");
+        assert_eq!(
+            config.redis.password, original_redis_password,
+            "Redis密码解密失败"
+        );
+        assert_eq!(config.jwt.secret, original_jwt_secret, "JWT密钥解密失败");
+
+        println!("\n=== 测试通过 ===");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_database_url_encryption_decryption() -> ConfigResult<()> {
+        unsafe { std::env::set_var("LUSER_ENCRYPTION_KEY", base64::encode(vec![1u8; 32])) };
+
+        init_global_encryptor()?;
+        let encryptor = get_global_encryptor()?;
+
+        let test_cases = vec![
+            // (url, should_be_encrypted)
+            ("postgres://user:password@localhost:5432/db", true),
+            ("postgres://admin:admin123@localhost:5432/testdb", true),
+            ("mysql://user:pass%40word@localhost:3306/mydb", true), // @编码为%40
+            ("postgres://user:pass%2Fword@localhost:5432/db", true), // /编码为%2F
+            ("postgres://user:pass%3Aword@localhost:5432/db", true), // :编码为%3A
+            ("postgres://user:@localhost:5432/db", false),          // 空密码，不应加密
+            ("postgres://user@localhost:5432/db", false),           // 无密码，不应加密
+        ];
+
+        for (i, (url, should_be_encrypted)) in test_cases.iter().enumerate() {
+            println!("\n测试 {}: {}", i + 1, url);
+
+            // 加密
+            let encrypted = encryptor.encrypt_database_url(url)?;
+            println!("加密后: {}", encrypted);
+
+            if *should_be_encrypted {
+                assert_ne!(encrypted, *url, "URL应该被加密但未被加密");
+            }
+
+            // 解密
+            let decrypted = encryptor.decrypt_database_url(&encrypted)?;
+            println!("解密后: {}", decrypted);
+
+            // 验证解密后与原始相同
+            assert_eq!(decrypted, *url, "测试 {} 失败: URL解密后不匹配", i + 1);
+        }
+
+        println!("\n所有数据库URL加密/解密测试通过！");
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_manager_encryption() -> ConfigResult<()> {
+        unsafe { env::set_var("LUSER_ENCRYPTION_KEY", base64::encode(vec![1u8; 32])) };
+
+        // 创建临时配置文件
+        let mut temp_file = NamedTempFile::new()?;
+        let config_content = r#"
+            [database]
+            url = "postgres://user:password@localhost:5432/db"
+            
+            [redis]
+            password = "redis_pass"
+            
+            [jwt]
+            secret = "jwt_secret"
+        "#;
+
+        std::fs::write(temp_file.path(), config_content)?;
+
+        // 使用ConfigManager加载配置
+        let mut manager = ConfigManager::new()?;
+
+        // 获取配置并验证
+        let config = manager.get_config();
+
+        // 导出加密配置
+        let export_path = temp_file.path().with_extension("encrypted.toml");
+        manager.export_to_file(&export_path)?;
+
+        // 读取导出的文件验证加密
+        let exported_content = std::fs::read_to_string(&export_path)?;
+        assert!(exported_content.contains("ENC["));
+
+        // 导入加密配置
+        manager.import_from_file(&export_path)?;
+
+        Ok(())
+    }
+    /// 测试密钥轮换
+    #[test]
+    fn test_key_rotation() -> ConfigResult<()> {
+        // 创建带密钥管理的加密管理器
+        let initial_key = EncryptionManager::generate_key(EncryptionAlgorithm::Aes256Gcm)?;
+        let rotation_interval = Duration::from_secs(3600); // 1小时
+
+        let manager = EncryptionManager::new_with_key_manager(
+            EncryptionAlgorithm::Aes256Gcm,
+            initial_key.clone(),
+            rotation_interval,
+        )?;
+
+        // 获取密钥管理器
+        let key_manager_ref = manager
+            .key_manager()
+            .expect("Key manager should be initialized");
+
+        // 获取初始密钥
+        let current_key = key_manager_ref.read().get_current_key();
+        assert_eq!(current_key, initial_key);
+
+        // 测试数据
+        let plaintext = "需要加密的敏感数据";
+
+        // 用当前密钥加密
+        let encrypted1 = manager.encrypt_string(plaintext)?;
+        println!("用初始密钥加密的数据: {}", encrypted1);
+
+        // 轮换密钥
+        let new_key_id = manager.rotate_key()?;
+        println!("新密钥ID: {}", new_key_id);
+
+        // 验证密钥已更新
+        let updated_key = key_manager_ref.read().get_current_key();
+        assert_ne!(updated_key, initial_key);
+        println!(
+            "初始密钥长度: {}, 新密钥长度: {}",
+            initial_key.len(),
+            updated_key.len()
+        );
+
+        // 用新密钥加密
+        let encrypted2 = manager.encrypt_string(plaintext)?;
+        println!("用新密钥加密的数据: {}", encrypted2);
+
+        // 验证两个密文不同（由于不同密钥和nonce）
+        assert_ne!(encrypted1, encrypted2);
+
+        // 用新密钥解密旧数据（应该失败，因为密钥不同）
+        let decrypt_old_result = manager.decrypt_string(&encrypted1);
+        println!("用新密钥解密旧数据的结果: {:?}", decrypt_old_result);
+        assert!(decrypt_old_result.is_err(), "用新密钥解密旧数据应该失败");
+
+        // 用历史密钥解密旧数据
+        let decrypted_with_history = key_manager_ref
+            .read()
+            .decrypt_with_historical_keys(&STANDARD.decode(&encrypted1)?, &manager)?;
+
+        let decrypted_str = String::from_utf8(decrypted_with_history).expect("decrypted_str String::from_utf8");
+        assert_eq!(decrypted_str, plaintext);
+        println!("用历史密钥成功解密旧数据");
+
+        // 用当前密钥解密新数据
+        let decrypted2 = manager.decrypt_string(&encrypted2)?;
+        assert_eq!(decrypted2, plaintext);
+        println!("用当前密钥成功解密新数据");
+
+        Ok(())
+    }
+
+    /// 测试配置加密器
+    #[test]
+    fn test_config_encryptor() -> ConfigResult<()> {
+       // 创建加密管理器
+    let key = EncryptionManager::generate_key(EncryptionAlgorithm::Aes256Gcm)?;
+    let manager = EncryptionManager::new(EncryptionAlgorithm::Aes256Gcm, key)?;
+    let encryptor = ConfigEncryptor::new(manager);
+    
+    // 测试不同安全级别的加密
+    let test_values = vec![
+        ("database.password", "mysecretpassword", ConfigSecurityLevel::Sensitive),
+        ("jwt.secret", "supersecretjwtkey", ConfigSecurityLevel::Secret),
+        ("api.key", "publicapikey", ConfigSecurityLevel::Public),
+        ("internal.token", "internal_token_123", ConfigSecurityLevel::Internal),
+    ];
+    
+    for (key, value, security_level) in test_values.clone() {
+        println!("测试配置项: key={}, level={:?}", key, security_level);
+        
+        // 加密
+        let encrypted = encryptor.encrypt_config_value(key, value, security_level)?;
+        println!("加密后: {}", encrypted);
+        
+        // 根据安全级别判断是否应该加密
+        match security_level {
+            ConfigSecurityLevel::Sensitive | ConfigSecurityLevel::Secret => {
+                // 对于敏感和机密级别，应该被加密
+                assert!(encryptor.is_encrypted_value(&encrypted),
+                       "{} 应该被加密，但未被识别为加密值", key);
+                
+                // 解密
+                let decrypted = encryptor.decrypt_config_value(key, &encrypted)?;
+                println!("解密后: {}", decrypted);
+                
+                // 验证解密结果
+                assert_eq!(decrypted, value,
+                          "解密后的值不匹配，key={}", key);
+            }
+            ConfigSecurityLevel::Public | ConfigSecurityLevel::Internal => {
+                // 对于公共和内部级别，不应该被加密（默认配置）
+                assert_eq!(encrypted, value,
+                          "未加密的值应该保持不变，key={}", key);
+                assert!(!encryptor.is_encrypted_value(&encrypted),
+                       "{} 不应该被识别为加密值", key);
+            }
+        }
+    }
+    
+    // 测试修改安全级别配置后的行为
+    println!("\n=== 测试修改安全级别配置 ===");
+    encryptor.set_security_levels(vec![
+        ConfigSecurityLevel::Public,
+        ConfigSecurityLevel::Internal,
+        ConfigSecurityLevel::Sensitive,
+        ConfigSecurityLevel::Secret,
+    ]);
+    
+    // 现在所有级别都应该加密
+    for (key, value, security_level) in test_values {
+        println!("测试配置项（修改后）: key={}, level={:?}", key, security_level);
+        
+        // 加密
+        let encrypted = encryptor.encrypt_config_value(key, value, security_level)?;
+        println!("加密后: {}", encrypted);
+        
+        // 现在所有级别都应该被加密
+        assert!(encryptor.is_encrypted_value(&encrypted),
+               "{} 应该被加密，但未被识别为加密值", key);
+        
+        // 解密
+        let decrypted = encryptor.decrypt_config_value(key, &encrypted)?;
+        println!("解密后: {}", decrypted);
+        
+        // 验证解密结果
+        assert_eq!(decrypted, value,
+                  "解密后的值不匹配，key={}", key);
+    }
+    
+    Ok(())
+    }
+
+    /// 测试批量加密解密
+    #[test]
+    fn test_batch_encryption() -> ConfigResult<()> {
+        let key = EncryptionManager::generate_key(EncryptionAlgorithm::Aes256Gcm)?;
+        let manager = EncryptionManager::new(EncryptionAlgorithm::Aes256Gcm, key)?;
+        let encryptor = ConfigEncryptor::new(manager);
+
+        // 准备批量数据
+        let values_to_encrypt = vec![
+            ("db.password", "dbpass123", ConfigSecurityLevel::Sensitive),
+            (
+                "redis.password",
+                "redispass456",
+                ConfigSecurityLevel::Sensitive,
+            ),
+            ("api.secret", "apisecret789", ConfigSecurityLevel::Secret),
+        ];
+
+        // 批量加密
+        let encrypted_results = encryptor.encrypt_config_values(&values_to_encrypt)?;
+        assert_eq!(encrypted_results.len(), 3);
+
+        // 转换格式用于批量解密
+        let encrypted_pairs: Vec<(&str, &str)> = encrypted_results
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        // 批量解密
+        let decrypted_results = encryptor.decrypt_config_values(&encrypted_pairs)?;
+        assert_eq!(decrypted_results.len(), 3);
+
+        // 验证解密结果
+        for ((original_key, original_value, _), (decrypted_key, decrypted_value)) in
+            values_to_encrypt.iter().zip(decrypted_results.iter())
+        {
+            assert_eq!(original_key, decrypted_key);
+            assert_eq!(original_value, decrypted_value);
+        }
+
+        Ok(())
+    }
+    /// 测试Nonce生成器
+    #[test]
+    fn test_nonce_generators() -> ConfigResult<()> {
+        // 测试安全Nonce生成器
+        let secure_generator = SecureNonceGenerator;
+        let nonce1 = secure_generator.generate_nonce(12);
+        let nonce2 = secure_generator.generate_nonce(12);
+        
+        assert_eq!(nonce1.len(), 12);
+        assert_eq!(nonce2.len(), 12);
+        assert_ne!(nonce1, nonce2); // 随机生成应该不同
+        
+        // 测试时间戳Nonce生成器
+        let timestamp_generator = TimestampNonceGenerator;
+        let nonce3 = timestamp_generator.generate_nonce(12);
+        let nonce4 = timestamp_generator.generate_nonce(12);
+        
+        assert_eq!(nonce3.len(), 12);
+        assert_eq!(nonce4.len(), 12);
+        // 时间戳可能相同（如果在同一纳秒内），但通常不同
+        
+        Ok(())
+    }
+    /// 测试数据完整性验证
+    #[test]
+    fn test_data_integrity() -> ConfigResult<()> {
+        let key = EncryptionManager::generate_key(EncryptionAlgorithm::Aes256Gcm)?;
+        let manager = EncryptionManager::new(EncryptionAlgorithm::Aes256Gcm, key)?;
+        
+        // 测试数据
+        let data1 = b"Important configuration data";
+        let data2 = b"Modified configuration data";
+        
+        // 计算哈希
+        let hash1 = manager.hash_data(data1)?;
+        let hash2 = manager.hash_data(data2)?;
+        
+        println!("Data1哈希: {}", hash1);
+        println!("Data2哈希: {}", hash2);
+        
+        // 验证相同数据的哈希
+        let same_hash = manager.hash_data(data1)?;
+        assert_eq!(hash1, same_hash);
+        
+        // 验证不同数据的哈希不同
+        assert_ne!(hash1, hash2);
+        
+        // 验证完整性
+        assert!(manager.verify_integrity(data1, &hash1)?);
+        assert!(!manager.verify_integrity(data1, &hash2)?);
+        assert!(!manager.verify_integrity(data2, &hash1)?);
+        
+        Ok(())
+    }
+   /// 测试密钥管理器的导入导出
+    #[test]
+    fn test_key_manager_import_export() -> ConfigResult<()> {
+        // 创建初始密钥管理器
+        let initial_key = EncryptionManager::generate_key(EncryptionAlgorithm::Aes256Gcm)?;
+        let key_manager1 = KeyManager::new(
+            initial_key.clone(),
+            Duration::from_secs(3600),
+        )?;
+        
+        // 执行几次密钥轮换
+        key_manager1.rotate_key()?;
+        key_manager1.rotate_key()?;
+        
+        // 创建导出密钥
+        let export_key = EncryptionManager::generate_key(EncryptionAlgorithm::Aes256Gcm)?;
+        
+        // 导出密钥历史
+        let encrypted_history = key_manager1.export_key_history(&export_key)?;
+        assert!(!encrypted_history.is_empty());
+        
+        // 导入到新的密钥管理器
+        let mut key_manager2 = KeyManager::new(
+            EncryptionManager::generate_key(EncryptionAlgorithm::Aes256Gcm)?,
+            Duration::from_secs(7200),
+        )?;
+        
+        key_manager2.import_key_history(&encrypted_history, &export_key)?;
+        
+        // 验证两个密钥管理器有相同的活动密钥
+        let key1 = key_manager1.get_current_key();
+        let key2 = key_manager2.get_current_key();
+        assert_eq!(key1, key2);
+        
+        // 验证密钥ID
+        if let Some(active_entry1) = key_manager1.key_history.read().iter().find(|e| e.active) {
+            if let Some(active_entry2) = key_manager2.key_history.read().iter().find(|e| e.active) {
+                assert_eq!(active_entry1.key_id, active_entry2.key_id);
+            }
+        }
+        
+        Ok(())
+    }
+    /// 测试环境变量集成
+    #[test]
+    fn test_env_integration() -> ConfigResult<()> {
+        // 生成测试密钥
+        let test_key = EncryptionManager::generate_key(EncryptionAlgorithm::Aes256Gcm)?;
+        let test_key_base64 = STANDARD.encode(&test_key);
+        
+        // 设置环境变量
+        unsafe { std::env::set_var("TEST_ENCRYPTION_KEY", &test_key_base64) };
+        
+        // 从环境变量创建加密管理器
+        let manager = EncryptionManager::from_env(EncryptionAlgorithm::Aes256Gcm, "TEST_ENCRYPTION_KEY")?;
+        
+        // 测试加密解密
+        let plaintext = "data from env";
+        let encrypted = manager.encrypt_string(plaintext)?;
+        let decrypted = manager.decrypt_string(&encrypted)?;
+        
+        assert_eq!(decrypted, plaintext);
+        
+        // 清理环境变量
+        unsafe { std::env::remove_var("TEST_ENCRYPTION_KEY") };
+        
+        // 测试不存在的环境变量
+        let result = EncryptionManager::from_env(EncryptionAlgorithm::Aes256Gcm, "NONEXISTENT_ENV_VAR");
+        assert!(result.is_err());
+        
+        Ok(())
+    }
+    /// 测试并发访问
+    #[test]
+    fn test_concurrent_access() -> ConfigResult<()> {
+        use std::sync::Arc;
+        use std::thread;
+        
+        let key = EncryptionManager::generate_key(EncryptionAlgorithm::Aes256Gcm)?;
+        let manager = Arc::new(EncryptionManager::new(EncryptionAlgorithm::Aes256Gcm, key)?);
+        
+        let mut handles = vec![];
+        let plaintext = "concurrent test data";
+        
+        // 启动多个线程并发加密
+        for i in 0..10 {
+            let manager_clone = manager.clone();
+            let plaintext_clone = plaintext.to_string();
+            
+            let handle = thread::spawn(move || {
+                let encrypted = manager_clone.encrypt_string(&plaintext_clone);
+                assert!(encrypted.is_ok());
+                
+                let decrypted = manager_clone.decrypt_string(&encrypted.unwrap());
+                assert!(decrypted.is_ok());
+                assert_eq!(decrypted.unwrap(), plaintext_clone);
+                
+                println!("线程 {} 完成", i);
+            });
+            
+            handles.push(handle);
+        }
+        
+        // 等待所有线程完成
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        
         Ok(())
     }
 }

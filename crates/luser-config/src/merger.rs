@@ -9,32 +9,44 @@ pub struct ConfigMerger;
 impl ConfigMerger {
     /// 深度合并两个JSON值
     pub fn deep_merge(base: &mut Value, overlay: &Value, replace_arrays: bool) {
-        match (base, overlay) {
-            (Value::Object(base_map), Value::Object(overlay_map)) => {
-                for (key, overlay_value) in overlay_map {
-                    if let Some(base_value) = base_map.get_mut(key) {
-                        // 递归合并
-                        Self::deep_merge(base_value, overlay_value, replace_arrays);
-                    } else {
-                        // 添加新字段
-                        base_map.insert(key.clone(), overlay_value.clone());
-                    }
-                }
-            }
-            (Value::Array(base_arr), Value::Array(overlay_arr)) => {
-                if replace_arrays {
-                    // 替换整个数组
-                    *base = Value::Array(overlay_arr.clone());
-                } else {
-                    // 合并数组（去重）
-                    for item in overlay_arr {
-                        if !base_arr.contains(item) {
-                            base_arr.push(item.clone());
+        match overlay {
+            Value::Object(overlay_map) => {
+                if let Some(base_map) = base.as_object_mut() {
+                    // 两个都是对象，递归合并
+                    for (key, overlay_value) in overlay_map {
+                        if let Some(base_value) = base_map.get_mut(key) {
+                            // 递归合并
+                            Self::deep_merge(base_value, overlay_value, replace_arrays);
+                        } else {
+                            // 添加新字段
+                            base_map.insert(key.clone(), overlay_value.clone());
                         }
                     }
+                } else {
+                    // base 不是对象，直接覆盖
+                    *base = overlay.clone();
                 }
             }
-            (base, overlay) => {
+            Value::Array(overlay_arr) => {
+                if let Some(base_arr) = base.as_array_mut() {
+                    // 两个都是数组
+                    if replace_arrays {
+                        // 替换整个数组
+                        *base = Value::Array(overlay_arr.clone());
+                    } else {
+                        // 合并数组（去重）
+                        for item in overlay_arr {
+                            if !base_arr.contains(item) {
+                                base_arr.push(item.clone());
+                            }
+                        }
+                    }
+                } else {
+                    // base 不是数组，直接覆盖
+                    *base = overlay.clone();
+                }
+            }
+            _ => {
                 // 其他类型直接覆盖
                 *base = overlay.clone();
             }

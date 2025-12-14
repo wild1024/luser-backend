@@ -22,10 +22,10 @@ pub const ENCRYPTION_KEY_ENV: &str = "LUSER_ENCRYPTION_KEY";
 pub const JWT_SECRET_ENV: &str = "LUSER_JWT_SECRET";
 
 /// 数据库URL环境变量
-pub const DATABASE_URL_ENV: &str = "DATABASE_URL";
+pub const DATABASE_URL_ENV: &str = "LUSER_DATABASE_URL";
 
 /// Redis URL环境变量
-pub const REDIS_URL_ENV: &str = "REDIS_URL";
+pub const REDIS_URL_ENV: &str = "LUSER_REDIS_URL";
 
 /// 运行模式环境变量
 pub const RUN_MODE_ENV: &str = "RUN_MODE";
@@ -97,6 +97,8 @@ pub const KEY_BACKUP_COUNT: usize = 3;
 /// 配置源类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigSourceType {
+    /// 运行时配置源
+    Runtime,
     /// 文件配置源
     File,
     /// 环境变量配置源
@@ -117,6 +119,7 @@ impl ConfigSourceType {
     /// 获取源类型名称
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Runtime => "runtime",
             Self::File => "file",
             Self::Environment => "environment",
             Self::CommandLine => "command_line",
@@ -131,13 +134,14 @@ impl ConfigSourceType {
     /// 获取源优先级（数值越小优先级越高）
     pub fn priority(&self) -> u8 {
         match self {
-            Self::Remote => 1,
-            Self::Database => 2,
-            Self::Custom => 3,
-            Self::CommandLine => 4,
-            Self::Environment => 5,
-            Self::File => 6,
-            Self::Default => 7,
+            Self::Runtime => 1,
+            Self::Remote => 2,
+            Self::Database => 3,
+            Self::Custom => 4,
+            Self::CommandLine => 5,
+            Self::Environment => 6,
+            Self::File => 7,
+            Self::Default => 8,
         }
     }
 }
