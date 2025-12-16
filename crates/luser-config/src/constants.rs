@@ -90,7 +90,6 @@ pub const ENCRYPTION_PREFIX: &str = "ENC[";
 pub const ENCRYPTION_SUFFIX: &str = "]";
 
 /// 密钥轮换相关常量
-pub const KEY_ROTATION_INTERVAL_DAYS: u32 = 90;
 pub const KEY_BACKUP_COUNT: usize = 3;
 
 

@@ -5,12 +5,12 @@ use aes_gcm::{
 use parking_lot::RwLock;
 use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tracing::{info, instrument, warn};
+use std::{sync::Arc, time::Duration};
+use tracing::{error, info, instrument, warn};
 
 use crate::{
     ConfigError, ConfigResult, ConfigSecurityLevel, ENCRYPTION_KEY_ENV, ENCRYPTION_PREFIX,
-    ENCRYPTION_SUFFIX,
+    ENCRYPTION_SUFFIX, KEY_BACKUP_COUNT,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 
@@ -89,7 +89,7 @@ impl NonceGenerator for SecureNonceGenerator {
     fn generate_nonce(&self, length: usize) -> Vec<u8> {
         let mut nonce = vec![0u8; length];
         let rng = ring::rand::SystemRandom::new();
-        rng.fill(&mut nonce).expect("Failed to generate nonce");
+        rng.fill(&mut nonce).expect("生成 nonce 失败");
         nonce
     }
 }
@@ -115,7 +115,7 @@ impl EncryptionManager {
         // 验证密钥长度
         if key.len() != algorithm.key_length() {
             return Err(ConfigError::EncryptionError(format!(
-                "Invalid key length: expected {}, got {}",
+                "密钥长度无效：预期为 {}，结果为 {}",
                 algorithm.key_length(),
                 key.len()
             )));
@@ -137,7 +137,7 @@ impl EncryptionManager {
         // 验证密钥长度
         if key.len() != algorithm.key_length() {
             return Err(ConfigError::EncryptionError(format!(
-                "Invalid key length: expected {}, got {}",
+                "密钥长度无效：预期为 {}，结果为 {}",
                 algorithm.key_length(),
                 key.len()
             )));
@@ -156,7 +156,7 @@ impl EncryptionManager {
     /// 从base64编码的密钥创建加密管理器
     pub fn from_base64_key(algorithm: EncryptionAlgorithm, base64_key: &str) -> ConfigResult<Self> {
         let key = STANDARD.decode(base64_key).map_err(|e| {
-            ConfigError::EncryptionError(format!("Failed to decode base64 key: {}", e))
+            ConfigError::EncryptionError(format!("解码 base64 密钥失败: {}", e))
         })?;
 
         Self::new(algorithm, key)
@@ -165,7 +165,7 @@ impl EncryptionManager {
     /// 从环境变量创建加密管理器
     pub fn from_env(algorithm: EncryptionAlgorithm, env_var: &str) -> ConfigResult<Self> {
         let base64_key = std::env::var(env_var).map_err(|e| {
-            ConfigError::EnvError(format!("Failed to read env var {}: {}", env_var, e))
+            ConfigError::EnvError(format!("读取环境变量失败 {}: {}", env_var, e))
         })?;
 
         Self::from_base64_key(algorithm, &base64_key)
@@ -177,7 +177,7 @@ impl EncryptionManager {
         let mut key = vec![0u8; length];
         let rng = ring::rand::SystemRandom::new();
         rng.fill(&mut key)
-            .map_err(|e| ConfigError::EncryptionError(format!("Failed to generate key: {}", e)))?;
+            .map_err(|e| ConfigError::EncryptionError(format!("生成密钥失败： {}", e)))?;
 
         Ok(key)
     }
@@ -232,13 +232,13 @@ impl EncryptionManager {
     /// 解密字符串
     pub fn decrypt_string(&self, ciphertext: &str) -> ConfigResult<String> {
         let ciphertext_bytes = STANDARD.decode(ciphertext).map_err(|e| {
-            ConfigError::EncryptionError(format!("Failed to decode base64 ciphertext: {}", e))
+            ConfigError::EncryptionError(format!("无法解码 base64 密文 ciphertext: {}", e))
         })?;
 
         let plaintext = self.decrypt(&ciphertext_bytes)?;
         String::from_utf8(plaintext).map_err(|e| {
             ConfigError::EncryptionError(format!(
-                "Failed to convert decrypted data to string: {}",
+                "未能将解密数据转换为字符串: {}",
                 e
             ))
         })
@@ -254,11 +254,11 @@ impl EncryptionManager {
             let new_key = key_manager.get_current_key();
             *self.key.write() = new_key;
 
-            info!("Encryption key rotated successfully: {}", new_key_id);
+            info!("加密密钥已成功轮换: {}", new_key_id);
             Ok(new_key_id)
         } else {
             Err(ConfigError::EncryptionError(
-                "Key management is not enabled".to_string(),
+                "密钥管理未启用".to_string(),
             ))
         }
     }
@@ -277,7 +277,7 @@ impl EncryptionManager {
     /// AES-GCM加密
     fn encrypt_aes_gcm(&self, key: &[u8], plaintext: &[u8]) -> ConfigResult<Vec<u8>> {
         let cipher = Aes256Gcm::new_from_slice(key)
-            .map_err(|e| ConfigError::EncryptionError(format!("Failed to create cipher: {}", e)))?;
+            .map_err(|e| ConfigError::EncryptionError(format!("创建cipher失败: {}", e)))?;
 
         let nonce_bytes = self
             .nonce_generator
@@ -286,7 +286,7 @@ impl EncryptionManager {
 
         let ciphertext = cipher
             .encrypt(nonce, plaintext)
-            .map_err(|e| ConfigError::EncryptionError(format!("Failed to encrypt: {}", e)))?;
+            .map_err(|e| ConfigError::EncryptionError(format!("加密失败: {}", e)))?;
 
         // 组合nonce和密文
         let mut result = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
@@ -302,21 +302,21 @@ impl EncryptionManager {
 
         if ciphertext.len() < nonce_length {
             return Err(ConfigError::EncryptionError(format!(
-                "Ciphertext too short: expected at least {}, got {}",
+                "密文太短：预计至少为 {}，得到的是 {}",
                 nonce_length,
                 ciphertext.len()
             )));
         }
 
         let cipher = Aes256Gcm::new_from_slice(key)
-            .map_err(|e| ConfigError::EncryptionError(format!("Failed to create cipher: {}", e)))?;
+            .map_err(|e| ConfigError::EncryptionError(format!("创建cipher失败 : {}", e)))?;
 
         let (nonce_bytes, actual_ciphertext) = ciphertext.split_at(nonce_length);
         let nonce = Nonce::from_slice(nonce_bytes);
 
         let plaintext = cipher
             .decrypt(nonce, actual_ciphertext)
-            .map_err(|e| ConfigError::DecryptionError(format!("Failed to decrypt: {}", e)))?;
+            .map_err(|e| ConfigError::DecryptionError(format!("解密失败: {}", e)))?;
 
         Ok(plaintext)
     }
@@ -325,14 +325,14 @@ impl EncryptionManager {
     fn encrypt_chacha20_poly1305(&self, key: &[u8], plaintext: &[u8]) -> ConfigResult<Vec<u8>> {
         // TODO 注意：这里使用AES-GCM作为替代，实际项目中应该实现ChaCha20-Poly1305
         // 由于依赖库限制，这里使用AES-GCM
-        warn!("ChaCha20-Poly1305 not implemented, using AES-GCM instead");
+        warn!("ChaCha20-Poly1305 未实现，改为使用 AES-GCM");
         self.encrypt_aes_gcm(key, plaintext)
     }
 
     /// ChaCha20-Poly1305解密
     fn decrypt_chacha20_poly1305(&self, key: &[u8], ciphertext: &[u8]) -> ConfigResult<Vec<u8>> {
         // TODO 注意：这里使用AES-GCM作为替代，实际项目中应该实现ChaCha20-Poly1305
-        warn!("ChaCha20-Poly1305 not implemented, using AES-GCM instead");
+        warn!("ChaCha20-Poly1305 未实现，改为使用 AES-GCM");
         self.decrypt_aes_gcm(key, ciphertext)
     }
 
@@ -425,7 +425,7 @@ impl ConfigEncryptor {
             return Ok(value.to_string());
         }
 
-        info!("Encrypting config value for key: {}", key);
+        info!("加密密钥的配置值: {}", key);
 
         let encrypted = self.encryption_manager.encrypt_string(value)?;
 
@@ -441,7 +441,7 @@ impl ConfigEncryptor {
             return Ok(value.to_string());
         }
 
-        info!("Decrypting config value for key: {}", key);
+        info!("解密密钥的配置值： {}", key);
 
         // 解析标记的加密值
         let (security_level, encrypted_value) = self.parse_encrypted_value(value)?;
@@ -485,7 +485,7 @@ impl ConfigEncryptor {
 
     /// 加密整个配置
     pub fn encrypt_config(&self, config: &mut crate::AppConfig) -> ConfigResult<()> {
-        info!("Encrypting configuration");
+        info!("加密配置");
 
         // 1. 加密数据库配置中的敏感信息
         self.encrypt_database_config(&mut config.database)?;
@@ -537,13 +537,13 @@ impl ConfigEncryptor {
         // 12. 加密扩展配置中的敏感信息
         self.encrypt_extensions(&mut config.extensions)?;
 
-        info!("Configuration encrypted successfully");
+        info!("配置加密成功");
         Ok(())
     }
 
     /// 解密整个配置
     pub fn decrypt_config(&self, config: &mut crate::AppConfig) -> ConfigResult<()> {
-        info!("Decrypting configuration");
+        info!("解密配置");
 
         // 1. 解密数据库配置中的敏感信息
         self.decrypt_database_config(&mut config.database)?;
@@ -587,7 +587,7 @@ impl ConfigEncryptor {
         // 12. 解密扩展配置中的敏感信息
         self.decrypt_extensions(&mut config.extensions)?;
 
-        info!("Configuration decrypted successfully");
+        info!("配置解密成功");
         Ok(())
     }
     /// 加密数据库配置
@@ -1343,7 +1343,7 @@ impl ConfigEncryptor {
     fn parse_encrypted_value(&self, value: &str) -> ConfigResult<(ConfigSecurityLevel, String)> {
         if !self.is_encrypted_value(value) {
             return Err(ConfigError::DecryptionError(
-                "Value is not encrypted".to_string(),
+                "值未加密".to_string(),
             ));
         }
 
@@ -1352,7 +1352,7 @@ impl ConfigEncryptor {
 
         if parts.len() != 2 {
             return Err(ConfigError::DecryptionError(
-                "Invalid encrypted value format".to_string(),
+                "加密值格式无效".to_string(),
             ));
         }
 
@@ -1366,7 +1366,7 @@ impl ConfigEncryptor {
             "secret" => ConfigSecurityLevel::Secret,
             _ => {
                 return Err(ConfigError::DecryptionError(format!(
-                    "Unknown security level: {}",
+                    "未知的安全级别: {}",
                     security_level_str
                 )));
             }
@@ -1420,7 +1420,7 @@ pub fn encrypt_config_value(
 ) -> ConfigResult<String> {
     // 从环境变量获取加密密钥
     let base64_key = std::env::var(ENCRYPTION_KEY_ENV)
-        .map_err(|e| ConfigError::EnvError(format!("LUSER_ENCRYPTION_KEY not set: {}", e)))?;
+        .map_err(|e| ConfigError::EnvError(format!("LUSER_ENCRYPTION_KEY 未设置: {}", e)))?;
 
     let encryption_manager =
         EncryptionManager::from_base64_key(EncryptionAlgorithm::Aes256Gcm, &base64_key)?;
@@ -1433,7 +1433,7 @@ pub fn encrypt_config_value(
 pub fn decrypt_config_value(key: &str, value: &str) -> ConfigResult<String> {
     // 从环境变量获取加密密钥
     let base64_key = std::env::var(ENCRYPTION_KEY_ENV)
-        .map_err(|e| ConfigError::EnvError(format!("LUSER_ENCRYPTION_KEY not set: {}", e)))?;
+        .map_err(|e| ConfigError::EnvError(format!("LUSER_ENCRYPTION_KEY 未设置: {}", e)))?;
 
     let encryption_manager =
         EncryptionManager::from_base64_key(EncryptionAlgorithm::Aes256Gcm, &base64_key)?;
@@ -1441,65 +1441,6 @@ pub fn decrypt_config_value(key: &str, value: &str) -> ConfigResult<String> {
 
     encryptor.decrypt_config_value(key, value)
 }
-
-// 全局加密器实例
-lazy_static::lazy_static! {
-    static ref GLOBAL_ENCRYPTOR: parking_lot::RwLock<Option<ConfigEncryptor>> = parking_lot::RwLock::new(None);
-}
-
-/// 初始化全局加密器
-pub fn init_global_encryptor() -> ConfigResult<()> {
-    let mut global_encryptor = GLOBAL_ENCRYPTOR.write();
-    if global_encryptor.is_none() {
-        // 从环境变量获取加密密钥
-        let base64_key = std::env::var(ENCRYPTION_KEY_ENV).unwrap_or_else(|_| {
-            warn!("LUSER_ENCRYPTION_KEY not set, using default key");
-            EncryptionManager::generate_base64_key(EncryptionAlgorithm::Aes256Gcm)
-                .unwrap_or_else(|_| base64::encode(vec![0u8; 32]))
-        });
-
-        let encryption_manager =
-            EncryptionManager::from_base64_key(EncryptionAlgorithm::Aes256Gcm, &base64_key)?;
-        *global_encryptor = Some(ConfigEncryptor::new(encryption_manager));
-    }
-    Ok(())
-}
-/// 初始化全局加密器（带密钥管理）
-pub fn init_global_encryptor_with_key_manager(
-    rotation_interval: std::time::Duration,
-) -> ConfigResult<()> {
-    let mut global_encryptor = GLOBAL_ENCRYPTOR.write();
-    if global_encryptor.is_none() {
-        // 从环境变量获取加密密钥
-        let base64_key = std::env::var(ENCRYPTION_KEY_ENV).unwrap_or_else(|_| {
-            warn!("LUSER_ENCRYPTION_KEY not set, using default key");
-            EncryptionManager::generate_base64_key(EncryptionAlgorithm::Aes256Gcm)
-                .unwrap_or_else(|_| base64::encode(vec![0u8; 32]))
-        });
-
-        let key = STANDARD.decode(&base64_key).map_err(|e| {
-            ConfigError::EncryptionError(format!("Failed to decode base64 key: {}", e))
-        })?;
-
-        let encryptor = ConfigEncryptor::new_with_key_manager(
-            EncryptionAlgorithm::Aes256Gcm,
-            key,
-            rotation_interval,
-        )?;
-
-        *global_encryptor = Some(encryptor);
-    }
-    Ok(())
-}
-/// 获取全局加密器
-pub fn get_global_encryptor() -> ConfigResult<ConfigEncryptor> {
-    let global_encryptor = GLOBAL_ENCRYPTOR.read();
-    global_encryptor
-        .as_ref()
-        .cloned()
-        .ok_or_else(|| ConfigError::NotInitialized("Global encryptor not initialized".to_string()))
-}
-
 /// 密钥管理器
 #[derive(Debug, Clone)]
 pub struct KeyManager {
@@ -1574,7 +1515,7 @@ impl KeyManager {
         });
 
         // 清理过期的密钥（保留最近3个）
-        if history.len() > 3 {
+        if history.len() > KEY_BACKUP_COUNT {
             history.remove(0);
         }
 
@@ -1632,7 +1573,7 @@ impl KeyManager {
                 }
 
                 Err(ConfigError::DecryptionError(
-                    "Failed to decrypt with any historical key".to_string(),
+                    "无法使用任何历史密钥解密".to_string(),
                 ))
             }
         }
@@ -1643,7 +1584,7 @@ impl KeyManager {
         let history = self.key_history.read();
 
         let export_data = serde_json::to_vec(&*history).map_err(|e| {
-            ConfigError::SerializationFailed(format!("Failed to serialize key history: {}", e))
+            ConfigError::SerializationFailed(format!("无法序列化密钥历史： {}", e))
         })?;
 
         // 使用导出密钥加密历史数据
@@ -1667,7 +1608,7 @@ impl KeyManager {
 
         // 反序列化历史数据
         let history: Vec<KeyHistoryEntry> = serde_json::from_slice(&decrypted).map_err(|e| {
-            ConfigError::DeserializationFailed(format!("Failed to deserialize key history: {}", e))
+            ConfigError::DeserializationFailed(format!("无法反序列化密钥历史: {}", e))
         })?;
 
         // 更新密钥管理器
@@ -1680,6 +1621,66 @@ impl KeyManager {
         Ok(())
     }
 }
+
+// 全局加密器实例
+lazy_static::lazy_static! {
+    static ref GLOBAL_ENCRYPTOR: parking_lot::RwLock<Option<ConfigEncryptor>> = parking_lot::RwLock::new(None);
+}
+
+/// 初始化全局加密器
+pub fn init_global_encryptor() -> ConfigResult<()> {
+    let mut global_encryptor = GLOBAL_ENCRYPTOR.write();
+    if global_encryptor.is_none() {
+        // 从环境变量获取加密密钥
+        let base64_key = std::env::var(ENCRYPTION_KEY_ENV).unwrap_or_else(|_| {
+            warn!("LUSER_ENCRYPTION_KEY 未设置, 使用默认生成秘钥键");
+            EncryptionManager::generate_base64_key(EncryptionAlgorithm::Aes256Gcm)
+                .unwrap_or_else(|_| base64::encode(vec![0u8; 32]))
+        });
+
+        let encryption_manager =
+            EncryptionManager::from_base64_key(EncryptionAlgorithm::Aes256Gcm, &base64_key)?;
+        *global_encryptor = Some(ConfigEncryptor::new(encryption_manager));
+    }
+    Ok(())
+}
+/// 初始化全局加密器（带密钥管理）
+pub fn init_global_encryptor_with_key_manager(
+    rotation_interval: std::time::Duration,
+) -> ConfigResult<()> {
+    let mut global_encryptor = GLOBAL_ENCRYPTOR.write();
+    if global_encryptor.is_none() {
+        // 从环境变量获取加密密钥
+        let base64_key = std::env::var(ENCRYPTION_KEY_ENV).unwrap_or_else(|_| {
+            warn!("LUSER_ENCRYPTION_KEY 未设置, 使用默认生成秘钥键");
+            EncryptionManager::generate_base64_key(EncryptionAlgorithm::Aes256Gcm)
+                .unwrap_or_else(|_| base64::encode(vec![0u8; 32]))
+        });
+
+        let key = STANDARD.decode(&base64_key).map_err(|e| {
+            ConfigError::EncryptionError(format!("解码 base64 密钥失败: {}", e))
+        })?;
+
+        let encryptor = ConfigEncryptor::new_with_key_manager(
+            EncryptionAlgorithm::Aes256Gcm,
+            key,
+            rotation_interval,
+        )?;
+
+        *global_encryptor = Some(encryptor);
+    }
+    Ok(())
+}
+/// 获取全局加密器
+pub fn get_global_encryptor() -> ConfigResult<ConfigEncryptor> {
+    let global_encryptor = GLOBAL_ENCRYPTOR.read();
+    global_encryptor
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| ConfigError::NotInitialized("全局加密器未初始化".to_string()))
+}
+
+
 
 #[cfg(test)]
 mod tests {

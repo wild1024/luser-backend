@@ -14,11 +14,11 @@ impl ConfigValidator {
     
     /// 验证配置
     pub fn validate(&self, config: &AppConfig) -> ConfigResult<()> {
-        info!("Validating configuration...");
+        info!("正在验证配置...");
         
         // 验证主配置
         config.validate()
-            .map_err(|e| ConfigError::ValidationFailed(format!("Main config validation failed: {}", e)))?;
+            .map_err(|e| ConfigError::ValidationFailed(format!("主配置验证失败: {}", e)))?;
         
         // 验证各个子配置
         self.validate_server_config(&config.server)?;
@@ -34,7 +34,7 @@ impl ConfigValidator {
         // 验证配置一致性
         self.validate_consistency(config)?;
         
-        info!("Configuration validation passed");
+        info!("配置验证通过");
         Ok(())
     }
     
@@ -44,20 +44,20 @@ impl ConfigValidator {
         if config.enable_https {
             if config.tls_cert_path.is_none() || config.tls_key_path.is_none() {
                 return Err(ConfigError::ValidationFailed(
-                    "HTTPS enabled but TLS certificate or key path not specified".to_string()
+                    "已启用 HTTPS，但未指定 TLS 证书或密钥路径".to_string()
                 ));
             }
             
             // 检查证书文件是否存在
             if let Some(cert_path) = &config.tls_cert_path {
                 if !std::path::Path::new(cert_path).exists() {
-                    warn!("TLS certificate file not found: {}", cert_path);
+                    warn!("未找到 TLS 证书文件: {}", cert_path);
                 }
             }
             
             if let Some(key_path) = &config.tls_key_path {
                 if !std::path::Path::new(key_path).exists() {
-                    warn!("TLS key file not found: {}", key_path);
+                    warn!("未找到 TLS 密钥文件: {}", key_path);
                 }
             }
         }
@@ -70,7 +70,7 @@ impl ConfigValidator {
         // 验证连接池配置
         if config.max_connections < config.min_connections {
             return Err(ConfigError::ValidationFailed(
-                format!("max_connections ({}) must be >= min_connections ({})", 
+                format!("max_connections ({}) 必须 >= min_connections ({})", 
                         config.max_connections, config.min_connections)
             ));
         }
@@ -78,7 +78,7 @@ impl ConfigValidator {
         // 验证SSL配置
         if config.enable_ssl {
             if config.ssl_ca_cert_path.is_none() {
-                warn!("SSL enabled but CA certificate path not specified");
+                warn!("数据库连接已启用 SSL，但未指定 CA 证书路径");
             }
         }
         
@@ -90,7 +90,7 @@ impl ConfigValidator {
         // 验证集群和哨兵模式互斥
         if config.cluster_mode && config.sentinel_mode {
             return Err(ConfigError::ValidationFailed(
-                "Redis cannot be both cluster mode and sentinel mode".to_string()
+                "Redis不能同时处于集群模式和哨兵模式".to_string()
             ));
         }
         
@@ -98,13 +98,13 @@ impl ConfigValidator {
         if config.sentinel_mode {
             if config.sentinel_master_name.is_none() {
                 return Err(ConfigError::ValidationFailed(
-                    "Sentinel mode requires sentinel_master_name".to_string()
+                    "Redis哨兵模式需要 sentinel_master_name".to_string()
                 ));
             }
             
             if config.sentinel_nodes.is_empty() {
                 return Err(ConfigError::ValidationFailed(
-                    "Sentinel mode requires at least one sentinel node".to_string()
+                    "Redis哨兵模式至少需要一个哨兵节点".to_string()
                 ));
             }
         }
@@ -116,7 +116,7 @@ impl ConfigValidator {
     fn validate_jwt_config(&self, config: &crate::JwtConfig) -> ConfigResult<()> {
         // 验证密钥长度
         if config.secret.len() < 32 {
-            warn!("JWT secret is too short ({} chars), recommended minimum is 32 chars", 
+            warn!("JWT 秘密太短（{} 字符），建议最少为 32 字符", 
                   config.secret.len());
         }
         
@@ -125,7 +125,7 @@ impl ConfigValidator {
                                "ES256", "ES384", "ES512", "PS256", "PS384", "PS512"];
         if !valid_algorithms.contains(&config.algorithm.as_str()) {
             return Err(ConfigError::ValidationFailed(
-                format!("Invalid JWT algorithm: {}, valid options are: {:?}", 
+                format!("无效的 JWT 算法：{}，有效选项为： {:?}", 
                         config.algorithm, valid_algorithms)
             ));
         }
@@ -139,13 +139,13 @@ impl ConfigValidator {
         for profile in &config.transcoding_profiles {
             if profile.width % 2 != 0 || profile.height % 2 != 0 {
                 return Err(ConfigError::ValidationFailed(
-                    format!("Video dimensions must be even numbers: {}x{}", 
+                    format!("视频尺寸必须是 numbers: {}x{}", 
                             profile.width, profile.height)
                 ));
             }
             
             if profile.width > 7680 || profile.height > 4320 {
-                warn!("Video resolution {}x{} exceeds common limits", 
+                warn!("视频分辨率 {}x{} 超过常见限制", 
                       profile.width, profile.height);
             }
         }
@@ -153,7 +153,7 @@ impl ConfigValidator {
         // 验证水印配置
         if config.watermark_enabled && config.watermark_path.is_none() {
             return Err(ConfigError::ValidationFailed(
-                "Watermark enabled but watermark path not specified".to_string()
+                "已启用水印，但未指定水印路径".to_string()
             ));
         }
         
@@ -162,7 +162,7 @@ impl ConfigValidator {
             let valid_providers = ["widevine", "playready", "fairplay", "clearkey"];
             if !valid_providers.contains(&config.drm_provider.to_lowercase().as_str()) {
                 return Err(ConfigError::ValidationFailed(
-                    format!("Invalid DRM provider: {}, valid options are: {:?}", 
+                    format!("无效的 DRM 提供者：{}，有效选项为: {:?}", 
                             config.drm_provider, valid_providers)
                 ));
             }
@@ -177,7 +177,7 @@ impl ConfigValidator {
         let currency_regex = regex::Regex::new(r"^[A-Z]{3}$").unwrap();
         if !currency_regex.is_match(&config.default_currency) {
             return Err(ConfigError::ValidationFailed(
-                format!("Invalid currency code: {}, must be 3 uppercase letters", 
+                format!("无效的货币代码：{}，必须是3个大写字母", 
                         config.default_currency)
             ));
         }
@@ -185,7 +185,7 @@ impl ConfigValidator {
         // 验证手续费率
         if config.platform_fee_rate < 0.0 || config.platform_fee_rate > 100.0 {
             return Err(ConfigError::ValidationFailed(
-                format!("Platform fee rate must be between 0 and 100: {}", 
+                format!("平台费用率必须在0到100之间: {}", 
                         config.platform_fee_rate)
             ));
         }
@@ -193,7 +193,7 @@ impl ConfigValidator {
         // 验证提现金额
         if config.min_withdrawal_amount > config.max_withdrawal_amount {
             return Err(ConfigError::ValidationFailed(
-                format!("min_withdrawal_amount ({}) must be <= max_withdrawal_amount ({})", 
+                format!("min_withdrawal_amount ({}) 必须 <= max_withdrawal_amount ({})", 
                         config.min_withdrawal_amount, config.max_withdrawal_amount)
             ));
         }
@@ -203,7 +203,7 @@ impl ConfigValidator {
             if channel_config.enabled {
                 if channel_config.fee_rate < 0.0 || channel_config.fee_rate > 100.0 {
                     return Err(ConfigError::ValidationFailed(
-                        format!("Channel {} fee rate must be between 0 and 100: {}", 
+                        format!("支付渠道 {} 的费率必须在 0 到 100 之间: {}", 
                                 channel_name, channel_config.fee_rate)
                     ));
                 }
@@ -219,11 +219,11 @@ impl ConfigValidator {
         if std::env::var(RUN_MODE_ENV).unwrap_or_default() == DEFAULT_RUN_MODE {
             // 开发环境使用弱密码警告
             if config.jwt.secret == "your-super-secret-jwt-key-change-in-production" {
-                warn!("Using default JWT secret in development mode");
+                warn!("在开发模式下使用默认的 JWT 密钥");
             }
             
             if config.encryption.key == base64::encode(vec![0u8; 32]) {
-                warn!("Using default encryption key in development mode");
+                warn!("在开发模式中使用默认加密密钥");
             }
         }
         
@@ -232,20 +232,20 @@ impl ConfigValidator {
             // 生产环境必须使用HTTPS
             if !config.server.enable_https {
                 return Err(ConfigError::ValidationFailed(
-                    "HTTPS must be enabled in production environment".to_string()
+                    "生产环境中必须启用 HTTPS".to_string()
                 ));
             }
             
             // 生产环境必须使用安全的JWT密钥
             if config.jwt.secret.len() < 64 {
                 return Err(ConfigError::ValidationFailed(
-                    "JWT secret must be at least 64 characters in production".to_string()
+                    "在生产环境中，JWT 密钥必须至少为 64 个字符".to_string()
                 ));
             }
             
             // 生产环境必须配置数据库SSL
             if !config.database.enable_ssl {
-                warn!("Database SSL is not enabled in production environment");
+                warn!("生产环境中未启用数据库 SSL");
             }
         }
         
@@ -263,14 +263,14 @@ impl ConfigValidator {
             
             let enabled_count = enabled_providers.iter().filter(|&&enabled| enabled).count();
             if enabled_count < 2 {
-                warn!("Multi-storage enabled but less than 2 storage providers are enabled");
+                warn!("多存储已启用，但启用的存储提供商少于 2 个");
             }
         }
         
         // 检查缓存配置一致性
         if config.cache.enabled {
             if !config.cache.enable_memory && !config.cache.enable_redis {
-                warn!("Cache enabled but no cache backend is enabled");
+                warn!("已启用缓存，但未启用缓存后端");
             }
         }
         
@@ -285,19 +285,19 @@ impl ConfigValidator {
             let enabled_count = enabled_providers.iter().filter(|&&enabled| enabled).count();
             if enabled_count == 0 {
                 return Err(ConfigError::ValidationFailed(
-                    "Queue enabled but no queue provider is enabled".to_string()
+                    "Queue队列已启用，但未启用队列提供程序".to_string()
                 ));
             }
             
             if enabled_count > 1 {
-                warn!("Multiple queue providers are enabled, only one will be used");
+                warn!("启用了多个队列提供程序，但只会使用一个");
             }
         }
         
         // 检查监控配置一致性
         if config.telemetry.enabled {
             if config.telemetry.endpoint.is_empty() {
-                warn!("Telemetry enabled but endpoint is empty");
+                warn!("Telemetry 已启用遥测，但终端为空");
             }
         }
         
@@ -307,7 +307,7 @@ impl ConfigValidator {
     /// 验证配置文件的语法
     pub fn validate_syntax(content: &str) -> ConfigResult<()> {
         toml::from_str::<AppConfig>(content)
-            .map_err(|e| ConfigError::ValidationFailed(format!("Invalid config syntax: {}", e)))?;
+            .map_err(|e| ConfigError::ValidationFailed(format!("配置语法无效: {}", e)))?;
         
         Ok(())
     }
@@ -318,13 +318,13 @@ impl ConfigValidator {
         
         if !path.exists() {
             return Err(ConfigError::ValidationFailed(
-                format!("Config file does not exist: {:?}", path)
+                format!("配置文件不存在: {:?}", path)
             ));
         }
         
         if !path.is_file() {
             return Err(ConfigError::ValidationFailed(
-                format!("Path is not a file: {:?}", path)
+                format!("路径不是文件: {:?}", path)
             ));
         }
         
@@ -334,7 +334,7 @@ impl ConfigValidator {
             .unwrap_or("");
         
         if !["toml", "json", "yaml", "yml"].contains(&extension) {
-            warn!("Config file has unusual extension: .{}", extension);
+            warn!("配置文件的扩展名不正常: .{}", extension);
         }
         
         Ok(())
@@ -346,33 +346,33 @@ impl ConfigValidator {
         
         // 检查关键配置项
         if config.jwt.secret.len() < 32 {
-            report.add_warning("JWT secret is too short".to_string());
+            report.add_warning("JWT 密钥太短".to_string());
         }
         
         if config.encryption.key == base64::encode(vec![0u8; 32]) {
-            report.add_warning("Using default encryption key".to_string());
+            report.add_warning("使用默认加密密钥".to_string());
         }
         
         if !config.server.enable_https {
-            report.add_warning("HTTPS is not enabled".to_string());
+            report.add_warning("未启用 HTTPS".to_string());
         }
         
         // 检查推荐配置
         if config.server.worker_threads < 2 {
-            report.add_warning("Worker threads is less than 2".to_string());
+            report.add_warning("工作线程少于2".to_string());
         }
         
         if config.database.max_connections < 10 {
-            report.add_warning("Database max connections is less than 10".to_string());
+            report.add_warning("数据库最大连接数少于10".to_string());
         }
         
         if config.redis.pool_size < 5 {
-            report.add_warning("Redis pool size is less than 5".to_string());
+            report.add_warning("Redis 池大小小于 5".to_string());
         }
         
         // 检查特性配置
         if config.features.enable_registration && !config.features.enable_email_verification {
-            report.add_warning("Registration enabled but email verification disabled".to_string());
+            report.add_warning("已启用注册，但未启用电子邮件验证".to_string());
         }
         
         report
@@ -421,7 +421,7 @@ impl ValidationReport {
     
     /// 获取报告摘要
     pub fn summary(&self) -> String {
-        format!("Validation {}: {} warnings, {} errors",
+        format!("验证 {}：{} 警告，{} 错误",
                 if self.is_passed() { "passed" } else { "failed" },
                 self.warnings.len(),
                 self.errors.len())
@@ -431,13 +431,13 @@ impl ValidationReport {
     pub fn generate_detailed_report(&self) -> String {
         let mut report = String::new();
         
-        report.push_str(&format!("Validation Report\n"));
+        report.push_str(&format!("验证报告t\n"));
         report.push_str(&format!("================\n\n"));
-        report.push_str(&format!("Status: {}\n\n", 
+        report.push_str(&format!("状态: {}\n\n", 
             if self.is_passed() { "PASSED" } else { "FAILED" }));
         
         if !self.errors.is_empty() {
-            report.push_str("Errors:\n");
+            report.push_str("错误:\n");
             for error in &self.errors {
                 report.push_str(&format!("  - {}\n", error));
             }
@@ -445,14 +445,14 @@ impl ValidationReport {
         }
         
         if !self.warnings.is_empty() {
-            report.push_str("Warnings:\n");
+            report.push_str("警告:\n");
             for warning in &self.warnings {
                 report.push_str(&format!("  - {}\n", warning));
             }
             report.push_str("\n");
         }
         
-        report.push_str(&format!("Total: {} errors, {} warnings\n", 
+        report.push_str(&format!("总计：{} 个错误，{} 个警告\n", 
             self.errors.len(), self.warnings.len()));
         
         report
@@ -473,17 +473,17 @@ pub fn validate_config(config: &AppConfig) -> ConfigResult<ValidationReport> {
         Ok(_) => {
             let report = ConfigValidator::generate_validation_report(config);
             if !report.is_passed() {
-                warn!("Config validation completed with warnings: {}", report.summary());
+                warn!("配置验证已完成，但有警告: {}", report.summary());
             } else {
-                info!("Config validation passed: {}", report.summary());
+                info!("配置验证通过: {}", report.summary());
             }
             Ok(report)
         }
         Err(e) => {
-            error!("Config validation failed: {}", e);
+            error!("配置验证失败: {}", e);
             let mut report = ValidationReport::new();
             report.add_error(e.to_string());
-            Err(ConfigError::ValidationFailed(format!("Config validation failed: {}", e)))
+            Err(ConfigError::ValidationFailed(format!("配置验证失败: {}", e)))
         }
     }
 }
@@ -495,14 +495,14 @@ pub fn validate_config_file(path: &str) -> ConfigResult<ValidationReport> {
     
     // 读取文件内容
     let content = std::fs::read_to_string(path)
-        .map_err(|e| ConfigError::IoError(format!("Failed to read config file: {}", e)))?;
+        .map_err(|e| ConfigError::IoError(format!("读取配置文件失败: {}", e)))?;
     
     // 验证语法
     ConfigValidator::validate_syntax(&content)?;
     
     // 加载配置
     let config: AppConfig = toml::from_str(&content)
-        .map_err(|e| ConfigError::DeserializationFailed(format!("Failed to deserialize config: {}", e)))?;
+        .map_err(|e| ConfigError::DeserializationFailed(format!("配置反序列化失败: {}", e)))?;
     
     // 验证配置
     validate_config(&config)

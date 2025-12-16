@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use serde_json::Value;
-use tracing::{debug, trace};
 use crate::error::ConfigResult;
 
 /// 配置合并器
@@ -71,16 +70,16 @@ impl ConfigMerger {
     /// 合并TOML配置
     pub fn merge_toml_configs(base: &str, overlay: &str, replace_arrays: bool) -> ConfigResult<String> {
         let base_value: Value = toml::from_str(base)
-            .map_err(|e| crate::error::ConfigError::DeserializationFailed(format!("Failed to parse base toml: {}", e)))?;
+            .map_err(|e| crate::error::ConfigError::DeserializationFailed(format!("解析基本 TOML 失败: {}", e)))?;
         
         let overlay_value: Value = toml::from_str(overlay)
-            .map_err(|e| crate::error::ConfigError::DeserializationFailed(format!("Failed to parse overlay toml: {}", e)))?;
+            .map_err(|e| crate::error::ConfigError::DeserializationFailed(format!("解析覆载 toml 失败: {}", e)))?;
         
         let mut merged_value = base_value.clone();
         Self::deep_merge(&mut merged_value, &overlay_value, replace_arrays);
         
         let merged_toml = toml::to_string_pretty(&merged_value)
-            .map_err(|e| crate::error::ConfigError::SerializationFailed(format!("Failed to serialize merged toml: {}", e)))?;
+            .map_err(|e| crate::error::ConfigError::SerializationFailed(format!("合并的 toml 序列化失败: {}", e)))?;
         
         Ok(merged_toml)
     }
@@ -258,7 +257,7 @@ impl ConfigDiff {
     /// 获取摘要
     pub fn summary(&self) -> String {
         format!(
-            "Added: {}, Modified: {}, Removed: {}",
+            "已添加：{}，已修改：{}，已删除: {}",
             self.added.len(),
             self.modified.len(),
             self.removed.len()

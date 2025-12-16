@@ -5,7 +5,7 @@
 
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_doc_code_examples)]
-
+mod init;
 mod config;
 mod database;
 mod loader;
@@ -22,6 +22,7 @@ pub use config::*;
 pub use loader::*;
 pub use manager::*;
 pub use merger::*;
+pub use init::*;
 pub use validator::*;
 pub use encryption::*;
 pub use database::*;
@@ -35,8 +36,10 @@ pub mod prelude {
         AppConfig, ConfigLoader, ConfigManager, ConfigValidator, ConfigWatcher,
         ConfigMerger, DatabaseConfigWatcher,
         ConfigError, ConfigResult, ConfigPriority, ConfigSourceType, 
-        load_config, get_config,
-        init_global_config, 
+        init_config, init_config_with_full, init_config_with_db,init_config_with_db_full,
+        init_config_with_db_force_full, init_config_with_db_force,
+        get_config,
+        set_global_config, 
         get_global_encryptor,
         DEFAULT_CONFIG_PATH, ENV_PREFIX,
     };

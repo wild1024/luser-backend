@@ -1,17 +1,15 @@
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use crate::{
     AppConfig, ConfigError, ConfigResult, ConfigSourceType, DEFAULT_CONFIG_FILE,
-    DEFAULT_CONFIG_PATH, DEFAULT_RUN_MODE, ENV_PREFIX, RUN_MODE_ENV,
+    DEFAULT_CONFIG_PATH, DEFAULT_RUN_MODE, DatabaseConfigLoader, ENV_PREFIX, RUN_MODE_ENV,
 };
 use chrono::Utc;
 use config::{Config, ConfigBuilder, Environment, File, FileFormat};
 use parking_lot::RwLock;
-use sqlx::Row;
 use sqlx::{Pool, Postgres};
 use tracing::debug;
 use tracing::{info, instrument, warn};
@@ -61,11 +59,11 @@ impl Default for MergeStrategy {
 pub struct ConfigLoader {
     sources: Vec<ConfigSource>,
     environment: String,
-    pub config_dir: PathBuf,
+    config_dir: PathBuf,
     /// 合并策略
     merge_strategy: MergeStrategy,
     /// 数据库连接池（用于动态配置）
-    db_pool: Option<Arc<Pool<Postgres>>>,
+     db_pool: Option<Arc<Pool<Postgres>>>,
     /// 配置缓存（数据库配置）
     db_config_cache: Arc<RwLock<Option<AppConfig>>>,
     /// 最后更新时间
@@ -106,7 +104,10 @@ impl ConfigLoader {
         self.environment = env.to_string();
         self
     }
-
+    /// 获取环境
+    pub fn get_env(&mut self) -> String {
+        self.environment.clone() 
+    }
     /// 设置配置目录
     pub fn set_config_dir<P: AsRef<Path>>(&mut self, dir: P) -> &mut Self {
         self.config_dir = dir.as_ref().to_path_buf();
@@ -122,7 +123,9 @@ impl ConfigLoader {
         self.db_pool = Some(Arc::new(pool));
         self
     }
-
+    pub fn get_db_pool(&self) -> Option<Arc<Pool<Postgres>>>{
+         self.db_pool.clone()
+    }
     /// 添加配置文件源
     fn add_source_file(
         &mut self,
@@ -135,7 +138,7 @@ impl ConfigLoader {
             .build()
             .map_err(|e| {
                 ConfigError::LoadFailed(format!(
-                    "Failed to build file config from {:?}: {}",
+                    "无法从 {:?}中构建文件配置: {}",
                     path, e
                 ))
             })?;
@@ -157,14 +160,14 @@ impl ConfigLoader {
 
         // 将默认配置转换为config::Config
         let default_toml = toml::to_string_pretty(&default_config).map_err(|e| {
-            ConfigError::SerializationFailed(format!("Failed to serialize default config: {}", e))
+            ConfigError::SerializationFailed(format!("无法序列化默认配置: {}", e))
         })?;
 
         let config = Config::builder()
             .add_source(File::from_str(&default_toml, FileFormat::Toml))
             .build()
             .map_err(|e| {
-                ConfigError::LoadFailed(format!("Failed to build default config: {}", e))
+                ConfigError::LoadFailed(format!("构建默认配置失败: {}", e))
             })?;
 
         self.sources.push(ConfigSource {
@@ -172,7 +175,7 @@ impl ConfigLoader {
             data: config,
             priority: ConfigPriority::Defaults,
             timestamp: Utc::now(),
-            description: "Default configuration values".to_string(),
+            description: "默认配置值".to_string(),
         });
 
         Ok(self)
@@ -185,10 +188,10 @@ impl ConfigLoader {
             self.add_source_file(
                 &default_config_path,
                 ConfigPriority::DefaultFile,
-                "Default config file",
+                "默认配置文件",
             )?;
         } else {
-            warn!("Default config file not found: {:?}", default_config_path);
+            warn!("未找到默认配置文件: {:?}", default_config_path);
         }
 
         Ok(self)
@@ -201,10 +204,10 @@ impl ConfigLoader {
             self.add_source_file(
                 &env_config_path,
                 ConfigPriority::EnvironmentFile,
-                &format!("{} environment config file", self.environment),
+                &format!("{} 环境配置文件", self.environment),
             )?;
         } else {
-            debug!("Environment config file not found: {:?}", env_config_path);
+            debug!("未找到: {:?} 环境配置文件", env_config_path);
         }
 
         Ok(self)
@@ -223,7 +226,7 @@ impl ConfigLoader {
             )
             .build()
             .map_err(|e| {
-                ConfigError::LoadFailed(format!("Failed to build environment config: {}", e))
+                ConfigError::LoadFailed(format!("构建环境配置失败: {}", e))
             })?;
 
         self.sources.push(ConfigSource {
@@ -231,43 +234,70 @@ impl ConfigLoader {
             data: config,
             priority: ConfigPriority::EnvironmentVariables,
             timestamp: Utc::now(),
-            description: "Environment variables".to_string(),
+            description: "环境变量".to_string(),
         });
 
         Ok(self)
     }
     /// 添加数据库配置源
-    pub fn add_database_source(&mut self) -> ConfigResult<&mut Self> {
+    pub async fn add_database_source(&mut self) -> ConfigResult<&mut Self> {
         if let Some(pool) = &self.db_pool {
-            // 尝试从数据库加载配置
-            let db_config = self.load_database_config(pool)?;
+            // 从数据库加载配置
+            match DatabaseConfigLoader::load_config_from_db(pool, &self.environment).await {
+                Ok(Some(config_map)) => {
+                    // 将配置转换为TOML格式
+                    let toml_string = toml::to_string(&config_map).map_err(|e| {
+                        ConfigError::SerializationFailed(format!(
+                            "无法序列化数据库配置: {}",
+                            e
+                        ))
+                    })?;
 
-            if let Some(config) = db_config {
-                self.sources.push(ConfigSource {
-                    source_type: ConfigSourceType::Database,
-                    data: config,
-                    priority: ConfigPriority::Database,
-                    timestamp: Utc::now(),
-                    description: "Database configuration".to_string(),
-                });
-                let merged_config = self.merge_sources()?;
-                let app_config: AppConfig = merged_config.try_deserialize().map_err(|e| {
-                    ConfigError::DeserializationFailed(format!(
-                        "Failed to deserialize merged config: {}",
-                        e
-                    ))
-                })?;
+                    // 构建config::Config
+                    let config = Config::builder()
+                        .add_source(File::from_str(&toml_string, FileFormat::Toml))
+                        .build()
+                        .map_err(|e| {
+                            ConfigError::LoadFailed(format!(
+                                "创建数据库配置失败: {}",
+                                e
+                            ))
+                        })?;
 
-                // 缓存数据库配置
-                *self.db_config_cache.write() = Some(app_config);
-            } else {
-                debug!("No database configuration found");
+                    self.sources.push(ConfigSource {
+                        source_type: ConfigSourceType::Database,
+                        data: config,
+                        priority: ConfigPriority::Database,
+                        timestamp: Utc::now(),
+                        description: "数据库配置".to_string(),
+                    });
+
+                    // 缓存合并后的配置
+                    if let Ok(merged) = self.merge_sources() {
+                        if let Ok(app_config) = merged.try_deserialize::<AppConfig>() {
+                            *self.db_config_cache.write() = Some(app_config);
+                        }
+                    }
+                }
+                Ok(None) => {
+                    debug!("未找到数据库配置");
+                }
+                Err(e) => {
+                    warn!("加载数据库配置失败: {}", e);
+                }
             }
         } else {
-            debug!("Database pool not set, skipping database configuration");
+            debug!("数据库池未设置，跳过数据库配置");
         }
 
         Ok(self)
+    }
+    /// 同步版本：从数据库加载配置（用于同步上下文）
+    fn add_database_source_sync(&mut self) -> ConfigResult<&mut Self> {
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| ConfigError::LoadFailed("不在 Tokio 运行时中".to_string()))?;
+
+        runtime.block_on(async { self.add_database_source().await })
     }
     /// 添加自定义配置源
     pub fn add_custom_source<F>(
@@ -285,7 +315,7 @@ impl ConfigLoader {
         let config_builder = builder(base_builder)?;
 
         let config = config_builder.build().map_err(|e| {
-            ConfigError::LoadFailed(format!("Failed to build custom config: {}", e))
+            ConfigError::LoadFailed(format!("构建自定义配置失败: {}", e))
         })?;
 
         self.sources.push(ConfigSource {
@@ -304,29 +334,23 @@ impl ConfigLoader {
         self.sources.clear();
 
         // 按照优先级从低到高添加源
-        // 1. 默认值（最低优先级）
+
         self.add_defaults_source()?;
-
-        // 2. 默认配置文件
         self.add_default_file_source()?;
-
-        // 3. 环境特定配置文件
         self.add_environment_file_source()?;
-
-        // 4. 环境变量
         self.add_environment_variables_source()?;
 
-        // 5. 数据库配置（如果可用）
-        self.add_database_source()?;
+        // 同步方式添加数据库配置
+        self.add_database_source_sync()?;
 
         Ok(())
     }
-    
+
     /// 加载配置
     #[instrument(skip(self), name = "config.load")]
     pub fn load(&mut self) -> ConfigResult<AppConfig> {
         info!(
-            "Loading configuration for environment: {}",
+            "正在加载环境配置: {}",
             self.environment
         );
 
@@ -339,7 +363,7 @@ impl ConfigLoader {
         // 3. 记录所有源
         for source in &self.sources {
             debug!(
-                "Config source: {} (priority: {:?})",
+                "配置来源: {} (优先级: {:?})",
                 source.description, source.priority
             );
         }
@@ -349,7 +373,7 @@ impl ConfigLoader {
         // 5. 反序列化为AppConfig
         let app_config: AppConfig = merged_config.try_deserialize().map_err(|e| {
             ConfigError::DeserializationFailed(format!(
-                "Failed to deserialize merged config: {}",
+                "无法反序列化合并后的配置: {}",
                 e
             ))
         })?;
@@ -358,13 +382,50 @@ impl ConfigLoader {
         self.log_config_summary(&app_config);
 
         info!(
-            "Configuration loaded successfully with {} sources",
+            "配置已成功加载，共有 {} 个来源",
             self.sources.len()
         );
 
         Ok(app_config)
     }
+    /// 异步版本：加载配置
+    #[instrument(skip(self), name = "config.load_async")]
+    pub async fn load_async(&mut self) -> ConfigResult<AppConfig> {
+        info!(
+            "正在加载环境配置： {}",
+            self.environment
+        );
 
+        // 按顺序添加所有配置源
+        self.sources.clear();
+        self.add_defaults_source()?;
+        self.add_default_file_source()?;
+        self.add_environment_file_source()?;
+        self.add_environment_variables_source()?;
+        self.add_database_source().await?;
+
+        // 按照优先级对源进行排序
+        self.sources.sort_by(|a, b| a.priority.cmp(&b.priority));
+
+        // 合并所有配置源
+        let merged_config = self.merge_sources()?;
+
+        // 反序列化为AppConfig
+        let app_config: AppConfig = merged_config.try_deserialize().map_err(|e| {
+            ConfigError::DeserializationFailed(format!(
+                "反序列化合并配置失败： {}",
+                e
+            ))
+        })?;
+
+        self.log_config_summary(&app_config);
+        info!(
+            "配置已成功加载，共 {} 个来源",
+            self.sources.len()
+        );
+
+        Ok(app_config)
+    }
     /// 合并所有配置源
     fn merge_sources(&self) -> ConfigResult<Config> {
         let mut current_config = Config::builder();
@@ -373,7 +434,7 @@ impl ConfigLoader {
         for source in &self.sources {
             if self.merge_strategy.debug {
                 debug!(
-                    "Applying config source: {} (priority: {:?})",
+                    "应用配置源：{}（优先级：{:?}）",
                     source.description, source.priority
                 );
             }
@@ -383,108 +444,15 @@ impl ConfigLoader {
 
         // 构建最终配置
         let config = current_config.build().map_err(|e| {
-            ConfigError::LoadFailed(format!("Failed to build merged config: {}", e))
+            ConfigError::LoadFailed(format!("构建合并配置失败: {}", e))
         })?;
 
         Ok(config)
     }
-    /// 从数据库加载配置
-    async fn load_database_config_async(
-        &self,
-        pool: &Pool<Postgres>,
-    ) -> ConfigResult<Option<Config>> {
-        // 这里假设有一个configurations表，结构如下：
-        // CREATE TABLE configurations (
-        //     id SERIAL PRIMARY KEY,
-        //     config_key VARCHAR(255) NOT NULL,
-        //     config_value TEXT,
-        //     config_type VARCHAR(50) NOT NULL, -- 'string', 'number', 'boolean', 'json'
-        //     environment VARCHAR(50) NOT NULL DEFAULT 'default',
-        //     priority INTEGER NOT NULL DEFAULT 100,
-        //     is_active BOOLEAN NOT NULL DEFAULT true,
-        //     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        //     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        // );
 
-        let result = sqlx::query(
-            r#"
-            SELECT config_key, config_value, config_type, environment, priority
-            FROM configurations
-            WHERE (environment = $1 OR environment = 'default')
-            AND is_active = true
-            ORDER BY environment DESC, priority DESC
-            "#,
-        )
-        .bind(&self.environment)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| ConfigError::LoadFailed(format!("Failed to load database config: {}", e)))?;
-
-        if result.is_empty() {
-            return Ok(None);
-        }
-
-        // 构建配置
-        let mut config_map = HashMap::new();
-
-        for row in result {
-            let key: String = row.get("config_key");
-            let value: String = row.get("config_value");
-            let config_type: String = row.get("config_type");
-            let _environment: String = row.get("environment");
-            let _priority: i32 = row.get("priority");
-
-            match config_type.as_str() {
-                "string" => {
-                    config_map.insert(key, value);
-                }
-                "number" => {
-                    if let Ok(num) = value.parse::<i64>() {
-                        config_map.insert(key, num.to_string());
-                    } else if let Ok(num) = value.parse::<f64>() {
-                        config_map.insert(key, num.to_string());
-                    }
-                }
-                "boolean" => {
-                    config_map.insert(key, value.to_lowercase());
-                }
-                "json" => {
-                    config_map.insert(key, value);
-                }
-                _ => {
-                    config_map.insert(key, value);
-                }
-            }
-        }
-
-        // 将配置转换为TOML格式
-        let toml_string = toml::to_string(&config_map).map_err(|e| {
-            ConfigError::SerializationFailed(format!("Failed to serialize database config: {}", e))
-        })?;
-
-        // 构建config::Config
-        let config = Config::builder()
-            .add_source(File::from_str(&toml_string, FileFormat::Toml))
-            .build()
-            .map_err(|e| {
-                ConfigError::LoadFailed(format!("Failed to build database config: {}", e))
-            })?;
-
-        Ok(Some(config))
-    }
-
-    /// 同步版本：从数据库加载配置
-    fn load_database_config(&self, pool: &Arc<Pool<Postgres>>) -> ConfigResult<Option<Config>> {
-        // 注意：这里使用了tokio的block_on，在生产环境中应该使用异步方法
-        // TODO 这里为了简化，假设已经在tokio运行时中
-        let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|_| ConfigError::LoadFailed("Not in tokio runtime".to_string()))?;
-
-        runtime.block_on(async { self.load_database_config_async(pool).await })
-    }
     /// 记录配置摘要
     fn log_config_summary(&self, config: &AppConfig) {
-        debug!("Configuration summary:");
+        debug!("配置摘要:");
         debug!("  Server: {}:{}", config.server.host, config.server.port);
         debug!("  Database: {}", config.database.url);
         debug!("  Redis: {}", config.redis.url);
@@ -502,21 +470,55 @@ impl ConfigLoader {
     /// 重新加载数据库配置
     pub fn reload_database_config(&mut self) -> ConfigResult<()> {
         if let Some(_) = &self.db_pool {
+            let runtime = tokio::runtime::Handle::try_current()
+                .map_err(|_| ConfigError::LoadFailed("不在 Tokio 运行时中".to_string()))?;
+
+            runtime.block_on(async { self.reload_database_config_async().await })?;
+        }
+
+        Ok(())
+    }
+    /// 重新加载数据库配置
+    pub async fn reload_database_config_async(&mut self) -> ConfigResult<()> {
+        if self.db_pool.is_some() {
             // 清除现有的数据库配置源
             self.sources
                 .retain(|s| s.source_type != ConfigSourceType::Database);
 
             // 重新加载数据库配置
-            self.add_database_source()?;
+            self.add_database_source().await?;
 
             // 更新最后更新时间
             *self.last_update_time.write() = Utc::now();
 
-            info!("Database configuration reloaded");
+            info!("数据库配置已重新加载");
         }
 
         Ok(())
     }
+    
+    /// 检查数据库配置是否需要重新加载
+    pub async fn should_reload_from_db(&self, interval_seconds: u64) -> Result<bool, ConfigError> {
+        let last_update = *self.last_update_time.read();
+        let now = Utc::now();
+        let duration = now - last_update;
+
+        if duration.num_seconds() >= interval_seconds as i64 {
+            if let Some(pool) = &self.db_pool {
+                let has_updates = DatabaseConfigLoader::check_config_updated(
+                    pool,
+                    &self.environment,
+                    last_update,
+                )
+                .await?;
+
+                return Ok(has_updates);
+            }
+        }
+
+        Ok(false)
+    }
+  
     /// 获取配置源信息
     pub fn get_source_info(&self) -> Vec<ConfigSourceInfo> {
         self.sources

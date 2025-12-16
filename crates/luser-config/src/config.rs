@@ -2653,21 +2653,18 @@ impl AppConfig {
     }
     /// 加密敏感配置
     pub fn encrypt_sensitive_fields(&mut self) -> ConfigResult<()> {
-        crate::encryption::init_global_encryptor()?;
         let encryptor = crate::encryption::get_global_encryptor()?;
         encryptor.encrypt_config(self)
     }
     
     /// 解密敏感配置
     pub fn decrypt_sensitive_fields(&mut self) -> ConfigResult<()> {
-        crate::encryption::init_global_encryptor()?;
         let encryptor = crate::encryption::get_global_encryptor()?;
         encryptor.decrypt_config(self)
     }
     
     /// 获取解密后的数据库URL
     pub fn get_decrypted_database_url(&self) -> ConfigResult<String> {
-        crate::encryption::init_global_encryptor()?;
         let encryptor = crate::encryption::get_global_encryptor()?;
         
         if encryptor.is_encrypted_value(&self.database.url) {
@@ -2680,7 +2677,6 @@ impl AppConfig {
     /// 获取解密后的Redis密码
     pub fn get_decrypted_redis_password(&self) -> ConfigResult<Option<String>> {
         if let Some(password) = &self.redis.password {
-            crate::encryption::init_global_encryptor()?;
             let encryptor = crate::encryption::get_global_encryptor()?;
             
             if encryptor.is_encrypted_value(password) {
@@ -2695,7 +2691,6 @@ impl AppConfig {
     
     /// 获取解密后的JWT密钥
     pub fn get_decrypted_jwt_secret(&self) -> ConfigResult<String> {
-        crate::encryption::init_global_encryptor()?;
         let encryptor = crate::encryption::get_global_encryptor()?;
         
         if encryptor.is_encrypted_value(&self.jwt.secret) {

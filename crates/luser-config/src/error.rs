@@ -5,59 +5,63 @@ use std::io;
 #[derive(Error, Debug)]
 pub enum ConfigError {
     /// 配置加载失败
-    #[error("Failed to load configuration: {0}")]
+    #[error("加载配置失败: {0}")]
     LoadFailed(String),
     
     /// 配置反序列化失败
-    #[error("Failed to deserialize configuration: {0}")]
+    #[error("配置反序列化失败: {0}")]
     DeserializationFailed(String),
     
     /// 配置序列化失败
-    #[error("Failed to serialize configuration: {0}")]
+    #[error("配置序列化失败: {0}")]
     SerializationFailed(String),
     
     /// 配置验证失败
-    #[error("Configuration validation failed: {0}")]
+    #[error("配置验证失败: {0}")]
     ValidationFailed(String),
     
+    /// 数据库错误
+    #[error("数据库错误: {0}")]
+    DatabaseError(String),
+
     /// 配置值未找到
-    #[error("Configuration value not found: {0}")]
+    #[error("未找到配置值: {0}")]
     ValueNotFound(String),
     
     /// 配置未初始化
-    #[error("Configuration not initialized: {0}")]
+    #[error("配置未初始化: {0}")]
     NotInitialized(String),
     
     /// 加密错误
-    #[error("Encryption error: {0}")]
+    #[error("加密错误: {0}")]
     EncryptionError(String),
     
     /// 解密错误
-    #[error("Decryption error: {0}")]
+    #[error("解密错误: {0}")]
     DecryptionError(String),
     
     /// 文件I/O错误
-    #[error("I/O error: {0}")]
+    #[error("I/O 错误: {0}")]
     IoError(String),
     
     /// 环境变量错误
-    #[error("Environment variable error: {0}")]
+    #[error("环境变量错误: {0}")]
     EnvError(String),
     
     /// 不支持的配置格式
-    #[error("Unsupported configuration format: {0}")]
+    #[error("不支持的配置格式: {0}")]
     UnsupportedFormat(String),
     
     /// 配置文件监控错误
-    #[error("Configuration file watch error: {0}")]
+    #[error("配置文件监视错误: {0}")]
     WatchError(String),
     
     /// 配置缓存错误
-    #[error("Configuration cache error: {0}")]
+    #[error("配置缓存错误: {0}")]
     CacheError(String),
     
     /// 未知错误
-    #[error("Unknown configuration error: {0}")]
+    #[error("未知配置错误: {0}")]
     Unknown(String),
 }
 
@@ -149,6 +153,9 @@ impl ErrorHandler {
             ConfigError::EncryptionError(msg) => {
                 format!("配置加密错误: {}", msg)
             }
+             ConfigError::DatabaseError(msg) => {
+                format!("数据库错误: {}", msg)
+            }
             ConfigError::IoError(msg) => {
                 format!("配置IO错误: {}", msg)
             }
@@ -175,6 +182,9 @@ impl ErrorHandler {
             }
             ConfigError::ValueNotFound(key) => {
                 format!("配置项 '{}' 未找到，请检查配置", key)
+            }
+            ConfigError::DatabaseError(key) => {
+                format!("数据库错误： '{}'", key)
             }
             _ => {
                 "配置处理过程中发生错误".to_string()
@@ -237,6 +247,9 @@ impl ErrorHandler {
             ConfigError::SerializationFailed(msg) => {
                 ConfigError::SerializationFailed(format!("{}: {}", context, msg))
             }
+            ConfigError::DatabaseError(msg) => {
+                ConfigError::DatabaseError(format!("{}: {}", context, msg))
+            },
         }
     }
 }
@@ -260,6 +273,8 @@ pub enum ErrorCode {
     IoError = 1007,
     /// 环境变量错误
     EnvError = 1008,
+    /// 配置未找到错误
+    DatabaseError = 1009,
     /// 未知错误
     UnknownError = 1999,
 }
@@ -272,6 +287,7 @@ impl From<&ConfigError> for ErrorCode {
             ConfigError::SerializationFailed(_) => ErrorCode::ParseError,
             ConfigError::ValidationFailed(_) => ErrorCode::ValidationError,
             ConfigError::ValueNotFound(_) => ErrorCode::NotFoundError,
+            ConfigError::DatabaseError(_) => ErrorCode::DatabaseError,
             ConfigError::NotInitialized(_) => ErrorCode::NotInitializedError,
             ConfigError::EncryptionError(_) => ErrorCode::EncryptionError,
             ConfigError::DecryptionError(_) => ErrorCode::EncryptionError,
@@ -290,6 +306,7 @@ impl ErrorCode {
             ErrorCode::ParseError => "配置解析失败",
             ErrorCode::ValidationError => "配置验证失败",
             ErrorCode::NotFoundError => "配置项未找到",
+            ErrorCode::DatabaseError => "数据库加载错误",
             ErrorCode::NotInitializedError => "配置未初始化",
             ErrorCode::EncryptionError => "配置加密/解密失败",
             ErrorCode::IoError => "配置IO操作失败",
@@ -310,6 +327,7 @@ impl ErrorCode {
             ErrorCode::IoError => 500,
             ErrorCode::EnvError => 500,
             ErrorCode::UnknownError => 500,
+            ErrorCode::DatabaseError => 500,
         }
     }
 }
