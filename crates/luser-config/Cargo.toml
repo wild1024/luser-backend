@@ -13,10 +13,9 @@ tokio = { workspace = true}
 serde =  { workspace = true}
 serde_json =  { workspace = true}
 
-anyhow =  { workspace = true}
 thiserror = { workspace = true}
 tracing = { workspace = true}
-tracing-subscriber = { workspace = true}
+
 async-trait = { workspace = true}
 
 chrono = { workspace = true}
@@ -33,15 +32,14 @@ lazy_static =  { workspace = true}
 regex =  { workspace = true}
 url =  { workspace = true}
 
-bincode =  { workspace = true}
+
 sqlx ={ workspace = true }
-redis = {workspace = true }
-bigdecimal = {workspace = true}
+
 rustls-pemfile = "2.1"
 toml = "0.9"
 config = "0.15"
 num_cpus = "1.17"
-secrecy = "0.8"
+
 percent-encoding = "2.3"
 notify = { version = "8.1.0", features = ["serde"] }
 

@@ -1,509 +1,98 @@
-use std::fmt;
+
+use std::{fmt, ops::Deref};
+
 use serde::{Deserialize, Serialize};
 use validator::Validate;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
-use crate::validation::*;
 
-/// API响应封装
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ApiResponse<T> {
-    /// 是否成功
+use crate::enums::{CloudVendor, Currency, PaymentChannel, PaymentStatus, Role};
+
+
+
+/// API响应包装
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Res<T> {
     pub success: bool,
-    /// 返回数据
+    pub code: u16,
+    pub message: String,
     pub data: Option<T>,
-    /// 错误信息
-    pub error: Option<ApiError>,
-    /// 请求ID
-    pub request_id: String,
-    /// 时间戳
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: i64,
 }
 
-impl<T> ApiResponse<T> {
-    /// 创建成功响应
+impl<T> Res<T> {
     pub fn success(data: T) -> Self {
         Self {
             success: true,
+            code: 200,
+            message: "success".to_string(),
             data: Some(data),
-            error: None,
-            request_id: generate_request_id(),
-            timestamp: Utc::now(),
+            timestamp: chrono::Utc::now().timestamp(),
         }
     }
-    
-    /// 创建错误响应
-    pub fn error(error: ApiError) -> Self {
-        Self {
-            success: false,
-            data: None,
-            error: Some(error),
-            request_id: generate_request_id(),
-            timestamp: Utc::now(),
-        }
-    }
-    
-    /// 创建空成功响应
-    pub fn empty() -> Self {
+    pub fn ok() -> Self {
         Self {
             success: true,
+            code: 200,
+            message: "success".to_string(),
             data: None,
-            error: None,
-            request_id: generate_request_id(),
-            timestamp: Utc::now(),
+            timestamp: chrono::Utc::now().timestamp(),
         }
     }
-}
-
-/// API错误信息
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ApiError {
-    /// 错误代码
-    pub code: String,
-    /// 错误消息
-    pub message: String,
-    /// 错误详情
-    pub details: Option<serde_json::Value>,
-    /// HTTP状态码
-    pub status_code: u16,
-}
-
-impl ApiError {
-    /// 创建新的API错误
-    pub fn new(code: &str, message: &str, status_code: u16) -> Self {
+    pub fn success_with_msg(message: impl Into<String>, data: T) -> Self {
         Self {
-            code: code.to_string(),
-            message: message.to_string(),
-            details: None,
-            status_code,
+            success: true,
+            code: 200,
+            message: message.into(),
+            data: Some(data),
+            timestamp: chrono::Utc::now().timestamp(),
         }
+    }
+
+}
+
+/// 通用ID参数
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdParam {
+    pub id: String,
+}
+
+/// 通用批量操作参数
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchParams {
+    pub ids: Vec<String>,
+}
+/// 安全字符串包装（防止日志泄露敏感信息）
+#[derive(Debug, Clone)]
+pub struct SensitiveString(String);
+
+impl SensitiveString {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
     }
     
-    /// 添加错误详情
-    pub fn with_details(mut self, details: serde_json::Value) -> Self {
-        self.details = Some(details);
-        self
+    pub fn expose(&self) -> &str {
+        &self.0
     }
 }
 
-impl fmt::Display for ApiError {
+impl Deref for SensitiveString {
+    type Target = str;
+    
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<String> for SensitiveString {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl fmt::Display for SensitiveString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for ApiError {}
-
-/// 分页请求参数
-#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
-pub struct Pagination {
-    /// 页码（从1开始）
-    #[validate(range(min = 1))]
-    pub page: u32,
-    
-    /// 每页大小
-    #[validate(range(min = 1, max = 100))]
-    pub page_size: u32,
-    
-    /// 排序字段
-    pub sort_by: Option<String>,
-    
-    /// 排序方向：asc/desc
-    pub sort_order: Option<String>,
-    
-    /// 搜索关键词
-    pub keyword: Option<String>,
-}
-
-impl Default for Pagination {
-    fn default() -> Self {
-        Self {
-            page: 1,
-            page_size: 20,
-            sort_by: None,
-            sort_order: None,
-            keyword: None,
-        }
-    }
-}
-
-/// 分页响应
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PaginatedResponse<T> {
-    /// 数据列表
-    pub items: Vec<T>,
-    
-    /// 总记录数
-    pub total: u64,
-    
-    /// 总页数
-    pub total_pages: u32,
-    
-    /// 当前页码
-    pub current_page: u32,
-    
-    /// 每页大小
-    pub page_size: u32,
-    
-    /// 是否有下一页
-    pub has_next: bool,
-    
-    /// 是否有上一页
-    pub has_prev: bool,
-}
-
-impl<T> PaginatedResponse<T> {
-    /// 创建分页响应
-    pub fn new(items: Vec<T>, total: u64, pagination: Pagination) -> Self {
-        let total_pages = ((total as f64) / (pagination.page_size as f64)).ceil() as u32;
-        let has_next = pagination.page < total_pages;
-        let has_prev = pagination.page > 1;
-        
-        Self {
-            items,
-            total,
-            total_pages,
-            current_page: pagination.page,
-            page_size: pagination.page_size,
-            has_next,
-            has_prev,
-        }
-    }
-    
-    /// 创建空分页响应
-    pub fn empty(pagination: Pagination) -> Self {
-        Self {
-            items: Vec::new(),
-            total: 0,
-            total_pages: 0,
-            current_page: pagination.page,
-            page_size: pagination.page_size,
-            has_next: false,
-            has_prev: false,
-        }
-    }
-}
-
-/// 用户角色
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, sqlx::Type)]
-#[sqlx(type_name = "varchar", rename_all = "snake_case")]
-pub enum Role {
-    /// 普通用户
-    User,
-    /// 内容创作者
-    Creator,
-    /// 管理员
-    Admin,
-    /// 超级管理员
-    SuperAdmin,
-}
-
-impl Role {
-    /// 获取所有角色
-    pub fn all() -> Vec<Self> {
-        vec![Self::User, Self::Creator, Self::Admin, Self::SuperAdmin]
-    }
-    
-    /// 检查是否有权限
-    pub fn has_permission(&self, required_role: Role) -> bool {
-        match (self, required_role) {
-            (Self::SuperAdmin, _) => true,
-            (Self::Admin, Role::Admin | Role::Creator | Role::User) => true,
-            (Self::Creator, Role::Creator | Role::User) => true,
-            (Self::User, Role::User) => true,
-            _ => false,
-        }
-    }
-    
-    /// 转换为字符串
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Creator => "creator",
-            Self::Admin => "admin",
-            Self::SuperAdmin => "super_admin",
-        }
-    }
-}
-
-impl std::fmt::Display for Role {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-impl std::str::FromStr for Role {
-    type Err = String;
-    
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "user" => Ok(Self::User),
-            "creator" => Ok(Self::Creator),
-            "admin" => Ok(Self::Admin),
-            "super_admin" => Ok(Self::SuperAdmin),
-            _ => Err(format!("无效的角色: {}", s)),
-        }
-    }
-}
-
-/// 用户状态
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, sqlx::Type)]
-#[sqlx(type_name = "varchar", rename_all = "snake_case")]
-pub enum UserStatus {
-    /// 活跃
-    Active,
-    /// 停用
-    Suspended,
-    /// 封禁
-    Banned,
-    /// 已删除
-    Deleted,
-}
-
-impl UserStatus {
-    /// 检查用户是否可用
-    pub fn is_active(&self) -> bool {
-        matches!(self, Self::Active)
-    }
-    
-    /// 转换为字符串
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Suspended => "suspended",
-            Self::Banned => "banned",
-            Self::Deleted => "deleted",
-        }
-    }
-}
-
-impl std::fmt::Display for UserStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-/// 支付状态
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, sqlx::Type)]
-#[sqlx(type_name = "varchar", rename_all = "snake_case")]
-pub enum PaymentStatus {
-    /// 待支付
-    Pending,
-    /// 处理中
-    Processing,
-    /// 支付成功
-    Success,
-    /// 支付失败
-    Failed,
-    /// 已退款
-    Refunded,
-    /// 已取消
-    Cancelled,
-}
-
-impl PaymentStatus {
-    /// 检查是否完成支付
-    pub fn is_completed(&self) -> bool {
-        matches!(self, Self::Success | Self::Refunded | Self::Cancelled)
-    }
-    
-    /// 转换为字符串
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Processing => "processing",
-            Self::Success => "success",
-            Self::Failed => "failed",
-            Self::Refunded => "refunded",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
-/// 视频状态
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, sqlx::Type)]
-#[sqlx(type_name = "varchar", rename_all = "snake_case")]
-pub enum VideoStatus {
-    /// 待上传
-    Pending,
-    /// 上传中
-    Uploading,
-    /// 转码中
-    Transcoding,
-    /// 审核中
-    Reviewing,
-    /// 已发布
-    Published,
-    /// 未通过审核
-    Rejected,
-    /// 已下架
-    Offline,
-    /// 已删除
-    Deleted,
-}
-
-impl VideoStatus {
-    /// 检查是否可播放
-    pub fn is_playable(&self) -> bool {
-        matches!(self, Self::Published)
-    }
-    
-    /// 转换为字符串
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Uploading => "uploading",
-            Self::Transcoding => "transcoding",
-            Self::Reviewing => "reviewing",
-            Self::Published => "published",
-            Self::Rejected => "rejected",
-            Self::Offline => "offline",
-            Self::Deleted => "deleted",
-        }
-    }
-}
-
-/// 云服务商类型
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, sqlx::Type)]
-#[sqlx(type_name = "varchar", rename_all = "snake_case")]
-pub enum CloudVendor {
-    /// 腾讯云点播
-    TencentVod,
-    /// 阿里云点播
-    AliyunVod,
-}
-
-impl CloudVendor {
-    /// 获取所有云服务商
-    pub fn all() -> Vec<Self> {
-        vec![Self::TencentVod, Self::AliyunVod]
-    }
-    
-    /// 转换为字符串
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::TencentVod => "tencent_vod",
-            Self::AliyunVod => "aliyun_vod",
-        }
-    }
-}
-
-impl std::fmt::Display for CloudVendor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-/// 支付渠道
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, sqlx::Type)]
-#[sqlx(type_name = "varchar", rename_all = "snake_case")]
-pub enum PaymentChannel {
-    /// 支付宝
-    Alipay,
-    /// 微信支付
-    Wechatpay,
-}
-
-impl PaymentChannel {
-    /// 获取所有支付渠道
-    pub fn all() -> Vec<Self> {
-        vec![Self::Alipay, Self::Wechatpay]
-    }
-    
-    /// 转换为字符串
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Alipay => "alipay",
-            Self::Wechatpay => "wechatpay",
-        }
-    }
-}
-
-/// 订阅计划类型
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, sqlx::Type)]
-#[sqlx(type_name = "varchar", rename_all = "snake_case")]
-pub enum SubscriptionPlan {
-    /// 免费
-    Free,
-    /// 月度订阅
-    Monthly,
-    /// 季度订阅
-    Quarterly,
-    /// 年度订阅
-    Yearly,
-    /// 终身订阅
-    Lifetime,
-}
-
-impl SubscriptionPlan {
-    /// 获取所有订阅计划
-    pub fn all() -> Vec<Self> {
-        vec![
-            Self::Free,
-            Self::Monthly,
-            Self::Quarterly,
-            Self::Yearly,
-            Self::Lifetime,
-        ]
-    }
-    
-    /// 获取订阅时长（天）
-    pub fn duration_days(&self) -> Option<u32> {
-        match self {
-            Self::Free => None,
-            Self::Monthly => Some(30),
-            Self::Quarterly => Some(90),
-            Self::Yearly => Some(365),
-            Self::Lifetime => None,
-        }
-    }
-    
-    /// 转换为字符串
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Free => "free",
-            Self::Monthly => "monthly",
-            Self::Quarterly => "quarterly",
-            Self::Yearly => "yearly",
-            Self::Lifetime => "lifetime",
-        }
-    }
-}
-
-/// 货币类型
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, sqlx::Type)]
-#[sqlx(type_name = "varchar")]
-pub enum Currency {
-    /// 人民币
-    CNY,
-    /// 美元
-    USD,
-    /// 欧元
-    EUR,
-}
-
-impl Currency {
-    /// 获取所有货币
-    pub fn all() -> Vec<Self> {
-        vec![Self::CNY, Self::USD, Self::EUR]
-    }
-    
-    /// 转换为ISO 4217代码
-    pub fn iso_code(&self) -> &'static str {
-        match self {
-            Self::CNY => "CNY",
-            Self::USD => "USD",
-            Self::EUR => "EUR",
-        }
-    }
-    
-    /// 获取货币符号
-    pub fn symbol(&self) -> &'static str {
-        match self {
-            Self::CNY => "¥",
-            Self::USD => "$",
-            Self::EUR => "€",
-        }
+        write!(f, "***SENSITIVE***")
     }
 }
 
@@ -607,6 +196,8 @@ pub struct VideoQuality {
     /// 播放URL
     pub url: String,
 }
+
+
 
 /// 支付请求
 #[derive(Debug, Serialize, Deserialize, Validate)]
@@ -771,7 +362,24 @@ impl TimeRange {
     pub fn new(start_time: Option<DateTime<Utc>>, end_time: Option<DateTime<Utc>>) -> Self {
         Self { start_time, end_time }
     }
+     pub fn today() -> Self {
+        let now = Utc::now();
+        let start = now.date().and_hms(0, 0, 0);
+        let end = now.date().and_hms(23, 59, 59);
+        Self {
+            start_time: Some(start),
+            end_time: Some(end),
+        }
+    }
     
+    pub fn last_7_days() -> Self {
+        let end = Utc::now();
+        let start = end - Duration::days(7);
+        Self {
+            start_time: Some(start),
+            end_time: Some(end),
+        }
+    }
     /// 检查时间是否在范围内
     pub fn contains(&self, time: &DateTime<Utc>) -> bool {
         if let Some(start) = &self.start_time {
@@ -831,10 +439,3 @@ pub struct DeviceInfo {
     pub device_model: Option<String>,
 }
 
-/// 生成请求ID
-fn generate_request_id() -> String {
-    use rand::Rng;
-    let mut rng = rand::rng();
-    let random_number: u32 = rng.random();
-    format!("{}-{}", chrono::Utc::now().timestamp_millis(), random_number)
-}

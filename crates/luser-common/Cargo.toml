@@ -5,8 +5,12 @@ edition = "2024"
 description = "Luser平台公共类型和工具库"
 
 [dependencies]
+luser-config = { path = "../luser-config" }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tracing-appender = "0.2"
+tracing-subscriber= "0.3"
+axum = {workspace = true}
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
@@ -14,6 +18,8 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 validator = { workspace = true }
+redis = { workspace = true }
+
 base64 = { workspace = true }
 hex = { workspace = true }
 url = { workspace = true }
@@ -24,9 +30,10 @@ lazy_static = { workspace = true }
 reqwest =  { workspace = true }
 argon2 = {workspace = true}
 aes-gcm =  { workspace = true }
+sha2= {workspace = true}
 ring =  { workspace = true }
 bigdecimal =  { workspace = true }
-
+jsonwebtoken = { workspace = true }
 percent-encoding = "2.3"
 rand = "0.9"
 num-traits = "0.2"

@@ -66,12 +66,12 @@ pub const CREATOR_LEVELS: [(i32, f64, u64); 5] = [
 ];
 
 /// 订阅价格（分）
-pub const SUBSCRIPTION_PRICES: [(crate::SubscriptionPlan, i64); 5] = [
-    (crate::SubscriptionPlan::Free, 0),
-    (crate::SubscriptionPlan::Monthly, 2990),   // 29.9元
-    (crate::SubscriptionPlan::Quarterly, 7990), // 79.9元
-    (crate::SubscriptionPlan::Yearly, 29990),   // 299.9元
-    (crate::SubscriptionPlan::Lifetime, 99990), // 999.9元
+pub const SUBSCRIPTION_PRICES: [(crate::enums::SubscriptionPlan, i64); 5] = [
+    (crate::enums::SubscriptionPlan::Free, 0),
+    (crate::enums::SubscriptionPlan::Monthly, 2990),   // 29.9元
+    (crate::enums::SubscriptionPlan::Quarterly, 7990), // 79.9元
+    (crate::enums::SubscriptionPlan::Yearly, 29990),   // 299.9元
+    (crate::enums::SubscriptionPlan::Lifetime, 99990), // 999.9元
 ];
 
 /// 费率配置（百分比）

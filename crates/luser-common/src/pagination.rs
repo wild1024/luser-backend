@@ -280,3 +280,52 @@ impl Default for PaginationBuilder {
         Self::new()
     }
 }
+
+
+/// 分页结果
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PaginatedResult<T> {
+    pub items: Vec<T>,
+    pub total: u64,
+    pub page: u64,
+    pub per_page: u64,
+    pub total_pages: u64,
+}
+
+impl<T> PaginatedResult<T> {
+    pub fn new(items: Vec<T>, total: u64, page: u64, per_page: u64) -> Self {
+        let total_pages = (total as f64 / per_page as f64).ceil() as u64;
+        
+        Self {
+            items,
+            total,
+            page,
+            per_page,
+            total_pages,
+        }
+    }
+    
+    pub fn has_next(&self) -> bool {
+        self.page < self.total_pages
+    }
+    
+    pub fn has_prev(&self) -> bool {
+        self.page > 1
+    }
+    
+    pub fn next_page(&self) -> Option<u64> {
+        if self.has_next() {
+            Some(self.page + 1)
+        } else {
+            None
+        }
+    }
+    
+    pub fn prev_page(&self) -> Option<u64> {
+        if self.has_prev() {
+            Some(self.page - 1)
+        } else {
+            None
+        }
+    }
+}

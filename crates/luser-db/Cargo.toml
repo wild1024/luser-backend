@@ -2,5 +2,31 @@
 name = "luser-db"
 version = "0.1.0"
 edition = "2024"
+description = "Enhanced database module with ActiveRecord pattern for LUSER"
 
 [dependencies]
+luser-config = { path = "../luser-config" }
+luser-common = { path = "../luser-common" }
+tracing = { workspace = true}
+thiserror = { workspace = true}
+chrono = { workspace = true}
+sqlx ={ workspace = true }
+tokio = { workspace = true}
+serde =  { workspace = true}
+serde_json =  { workspace = true}
+bigdecimal = { workspace = true}
+uuid = { workspace = true}
+sha2= { workspace = true}
+once_cell = "1.0"
+async-trait = {workspace = true}
+parking_lot =  { workspace = true}
+
+[dev-dependencies]
+dotenv = "0.15"
+
+[features]
+default = ["sqlx/runtime-tokio-native-tls"]
+global = []  # 启用全局数据库功能
+model-macros = []  # 启用模型宏
+migrate = []  # 启用迁移功能
+test = []  # 启用测试功能
